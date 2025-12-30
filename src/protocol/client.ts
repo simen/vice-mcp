@@ -475,7 +475,8 @@ export class ViceClient {
   }
 
   async continue(): Promise<void> {
-    await this.sendCommand(Command.Continue);
+    // Exit command (0xaa) resumes execution
+    await this.sendCommand(Command.Exit);
     this.state.running = true;
   }
 

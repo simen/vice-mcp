@@ -4,7 +4,7 @@
 export const STX = 0x02;
 export const API_VERSION = 0x01; // VICE 3.x uses API v1
 
-// Command codes (per official VICE manual)
+// Command codes (per official VICE manual: https://vice-emu.sourceforge.io/vice_13.html)
 export enum Command {
   // Memory operations
   MemoryGet = 0x01,
@@ -32,24 +32,28 @@ export enum Command {
   ResourceGet = 0x51,
   ResourceSet = 0x52,
 
-  // Advance instructions
+  // Advance/step instructions
   AdvanceInstructions = 0x71,
   KeyboardFeed = 0x72,
+  ExecuteUntilReturn = 0x73,
+
+  // Info/query commands
+  Ping = 0x81,
+  BanksAvailable = 0x82,
+  RegistersAvailable = 0x83,
+  DisplayGet = 0x84,
+  ViceInfo = 0x85,
+
+  // Palette
+  PaletteGet = 0x91,
+
+  // Joyport/Userport
+  JoyportSet = 0xa2,
+  UserportSet = 0xb2,
 
   // Execution control
-  Step = 0x81,
-  Continue = 0x82,  // Also called "Exit" - resumes execution
-  Ping = 0x81,      // Same as step with count=0
-
-  // Display
-  DisplayGet = 0x84,
-
-  // Banks
-  BanksAvailable = 0x83,
-
-  // Exit/Quit
-  Exit = 0xaa,
-  Quit = 0xbb,
+  Exit = 0xaa,       // Resumes execution (continue)
+  Quit = 0xbb,       // Terminates VICE
 
   // Reset
   Reset = 0xcc,
@@ -58,20 +62,26 @@ export enum Command {
   AutoStart = 0xdd,
 }
 
-// Response types (per official VICE manual)
+// Response types (per official VICE manual: https://vice-emu.sourceforge.io/vice_13.html)
+// Note: Most commands echo back with the same response code as the command
+// These are the ASYNC event response types that VICE sends unprompted:
 export enum ResponseType {
   Invalid = 0x00,
-  MemoryGet = 0x01,    // Memory read response
-  MemorySet = 0x02,    // Memory write response
-  CheckpointResponse = 0x11, // Checkpoint set/get/delete response
-  CheckpointInfo = 0x12,     // Checkpoint info
-  RegisterInfo = 0x31,       // Register info (async event when stopped)
+
+  // Command response codes (echoed from command)
+  MemoryGet = 0x01,
+  MemorySet = 0x02,
+  CheckpointInfo = 0x11,
+  RegisterInfo = 0x31,
   Dump = 0x41,
   Undump = 0x42,
   ResourceGet = 0x51,
   ResourceSet = 0x52,
-  Stopped = 0x62,            // Stopped event (async)
-  Resumed = 0x63,            // Resumed event (async)
+
+  // Async event codes (sent by VICE unprompted)
+  JAM = 0x61,                // CPU jam event
+  Stopped = 0x62,            // Execution stopped
+  Resumed = 0x63,            // Execution resumed
 }
 
 // Memory spaces
