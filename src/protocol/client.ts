@@ -169,9 +169,9 @@ export class ViceClient {
     debugLog("Received data", data);
 
     // Process complete packets
-    // Response header: STX(1) + API(1) + bodyLength(4) + responseType(1) + errorCode(1) + requestId(1) = 9 bytes
+    // Response header: STX(1) + API(1) + bodyLength(4) + responseType(1) + errorCode(1) + requestId(4) = 12 bytes
     // Then body of `bodyLength` bytes follows
-    while (this.responseBuffer.length >= 9) {
+    while (this.responseBuffer.length >= 12) {
       const stx = this.responseBuffer[0];
       if (stx !== STX) {
         // Protocol error, skip byte
@@ -181,7 +181,7 @@ export class ViceClient {
       }
 
       const bodyLength = this.responseBuffer.readUInt32LE(2);
-      const totalLength = 9 + bodyLength; // Header (9) + body
+      const totalLength = 12 + bodyLength; // Header (12) + body
 
       debugLog(`Packet: bodyLength=${bodyLength}, totalLength=${totalLength}, bufferLen=${this.responseBuffer.length}`);
 
@@ -191,11 +191,11 @@ export class ViceClient {
       }
 
       // Parse complete packet
-      // Response format: STX(1) + API(1) + bodyLen(4) + type(1) + error(1) + reqId(1) + body
+      // Response format: STX(1) + API(1) + bodyLen(4) + type(1) + error(1) + reqId(4) + body
       const responseType = this.responseBuffer[6] as ResponseType;
       const errorCode = this.responseBuffer[7] as ErrorCode;
-      const requestId = this.responseBuffer[8];
-      const body = this.responseBuffer.subarray(9, totalLength);
+      const requestId = this.responseBuffer.readUInt32LE(8);
+      const body = this.responseBuffer.subarray(12, totalLength);
 
       debugLog(`Parsed response: type=0x${responseType.toString(16)}, error=0x${errorCode.toString(16)}, reqId=${requestId}`);
       debugLog("Response body", body);
@@ -232,9 +232,9 @@ export class ViceClient {
       // Don't return - continue to check for pending requests
     }
 
-    // VICE API v1 sends some responses as async events (ReqID=0xff)
+    // VICE sends async events with ReqID=0xffffffff
     // For these, we match by response type to the oldest pending request expecting that type
-    if (response.requestId === 0xff) {
+    if (response.requestId === 0xffffffff) {
       // Find a pending request that expects this response type
       for (const [reqId, pending] of this.pendingRequests) {
         if (pending.expectedResponseType === response.responseType) {
@@ -306,14 +306,14 @@ export class ViceClient {
 
     const requestId = this.nextRequestId();
 
-    // Build packet: STX(1) + API(1) + Length(4) + RequestID(1) + Command(1) + Body
-    // Length field is ONLY the command body, NOT including ReqID or Command
-    const header = Buffer.alloc(8);
+    // Build packet: STX(1) + API(1) + Length(4) + RequestID(4) + Command(1) + Body = 11 byte header
+    // Length field is ONLY the command body, NOT including header fields
+    const header = Buffer.alloc(11);
     header[0] = STX;
     header[1] = API_VERSION;
     header.writeUInt32LE(body.length, 2); // Just the command body length
-    header[6] = requestId;
-    header[7] = command;
+    header.writeUInt32LE(requestId, 6);   // Request ID is 4 bytes!
+    header[10] = command;
 
     const packet = Buffer.concat([header, body]);
     debugLog(`Sending command 0x${command.toString(16)}, reqId=${requestId}, expectType=${expectedResponseType?.toString(16) ?? 'any'}`, packet);
