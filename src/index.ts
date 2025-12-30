@@ -4,6 +4,14 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { getViceClient, ViceError } from "./protocol/index.js";
+import {
+  getColorInfo,
+  screenToText,
+  getVicBank,
+  getVideoAddresses,
+  getGraphicsMode,
+  isSpriteVisible,
+} from "./utils/index.js";
 
 const server = new McpServer({
   name: "vice-mcp",
@@ -644,6 +652,425 @@ Related tools: setBreakpoint, deleteBreakpoint`,
       })),
       hint: `${breakpoints.length} breakpoint(s) active. Use deleteBreakpoint(id) to remove.`,
     });
+  }
+);
+
+// =============================================================================
+// SEMANTIC LAYER TOOLS - Interpreted output for autonomous debugging
+// =============================================================================
+
+// Tool: readScreen - Get screen contents as text
+server.registerTool(
+  "readScreen",
+  {
+    description: `Read the C64 screen memory and return it as interpreted text.
+
+Converts PETSCII screen codes to readable ASCII. Returns 25 lines of 40 characters.
+
+Use this instead of readMemory($0400) when you want to see what's displayed on screen.
+
+Note: This reads from the current screen RAM location (may not be $0400 if the program moved it).
+In bitmap modes, the data won't represent text.
+
+Options:
+- includeRaw: Also return raw screen codes (default: false)
+
+Related tools: readColorRam, readVicState, readMemory`,
+    inputSchema: z.object({
+      includeRaw: z
+        .boolean()
+        .optional()
+        .describe("Include raw screen codes array (default: false)"),
+    }),
+  },
+  async (args) => {
+    try {
+      // First get VIC bank from CIA2
+      const cia2Data = await client.readMemory(0xdd00, 0xdd00);
+      const bankInfo = getVicBank(cia2Data[0]);
+
+      // Get screen address from $D018
+      const d018Data = await client.readMemory(0xd018, 0xd018);
+      const videoAddrs = getVideoAddresses(d018Data[0], bankInfo.baseAddress);
+
+      // Read screen RAM (1000 bytes)
+      const screenData = await client.readMemory(
+        videoAddrs.screenAddress,
+        videoAddrs.screenAddress + 999
+      );
+
+      // Convert to text
+      const textLines = screenToText(screenData);
+
+      // Find non-empty lines for summary
+      const nonEmptyLines = textLines
+        .map((line, idx) => ({ line: idx, content: line }))
+        .filter((l) => l.content.trim().length > 0);
+
+      const response: Record<string, unknown> = {
+        screenAddress: {
+          value: videoAddrs.screenAddress,
+          hex: `$${videoAddrs.screenAddress.toString(16).padStart(4, "0")}`,
+        },
+        vicBank: bankInfo.bank,
+        lines: textLines,
+        summary: {
+          nonEmptyLines: nonEmptyLines.length,
+          preview:
+            nonEmptyLines.length > 0
+              ? nonEmptyLines.slice(0, 3).map((l) => `Line ${l.line}: "${l.content}"`)
+              : ["Screen appears empty"],
+        },
+      };
+
+      if (args.includeRaw) {
+        response.raw = Array.from(screenData);
+      }
+
+      // Check graphics mode and add hint
+      const d011Data = await client.readMemory(0xd011, 0xd011);
+      const d016Data = await client.readMemory(0xd016, 0xd016);
+      const graphicsMode = getGraphicsMode(d011Data[0], d016Data[0]);
+
+      response.graphicsMode = graphicsMode.mode;
+
+      if (graphicsMode.bitmap) {
+        response.hint =
+          "Warning: VIC-II is in bitmap mode - screen RAM contains bitmap data, not text.";
+      } else if (nonEmptyLines.length === 0) {
+        response.hint = "Screen appears empty or contains only spaces.";
+      } else {
+        response.hint = `Screen has ${nonEmptyLines.length} non-empty line(s). First: "${nonEmptyLines[0]?.content || ""}"`;
+      }
+
+      return formatResponse(response);
+    } catch (error) {
+      return formatError(error as ViceError);
+    }
+  }
+);
+
+// Tool: readColorRam - Get color RAM state
+server.registerTool(
+  "readColorRam",
+  {
+    description: `Read color RAM ($D800-$DBE7) and return color values with names.
+
+Color RAM determines the foreground color of each character on screen.
+
+Returns:
+- 25x40 grid of color values (0-15) with names
+- Summary of colors used
+
+Related tools: readScreen, readVicState`,
+    inputSchema: z.object({
+      summary: z
+        .boolean()
+        .optional()
+        .describe("Return only color usage summary, not full grid (default: false)"),
+    }),
+  },
+  async (args) => {
+    try {
+      // Color RAM is always at $D800
+      const colorData = await client.readMemory(0xd800, 0xd800 + 999);
+
+      // Count color usage
+      const colorCounts = new Map<number, number>();
+      for (const byte of colorData) {
+        const color = byte & 0x0f;
+        colorCounts.set(color, (colorCounts.get(color) || 0) + 1);
+      }
+
+      // Sort by frequency
+      const colorUsage = Array.from(colorCounts.entries())
+        .sort((a, b) => b[1] - a[1])
+        .map(([color, count]) => ({
+          color: getColorInfo(color),
+          count,
+          percentage: Math.round((count / 1000) * 100),
+        }));
+
+      const response: Record<string, unknown> = {
+        address: { value: 0xd800, hex: "$D800" },
+        summary: {
+          uniqueColors: colorUsage.length,
+          dominantColor: colorUsage[0]?.color || null,
+          usage: colorUsage,
+        },
+      };
+
+      if (!args.summary) {
+        // Convert to 25 lines of 40 color values
+        const colorLines: Array<Array<{ value: number; name: string }>> = [];
+        for (let row = 0; row < 25; row++) {
+          const line: Array<{ value: number; name: string }> = [];
+          for (let col = 0; col < 40; col++) {
+            const offset = row * 40 + col;
+            line.push(getColorInfo(colorData[offset]));
+          }
+          colorLines.push(line);
+        }
+        response.grid = colorLines;
+      }
+
+      response.hint =
+        colorUsage.length === 1
+          ? `Entire screen uses ${colorUsage[0].color.name} (${colorUsage[0].color.value})`
+          : `${colorUsage.length} colors used. Dominant: ${colorUsage[0]?.color.name} (${colorUsage[0]?.percentage}%)`;
+
+      return formatResponse(response);
+    } catch (error) {
+      return formatError(error as ViceError);
+    }
+  }
+);
+
+// Tool: readVicState - Full VIC-II chip state
+server.registerTool(
+  "readVicState",
+  {
+    description: `Read the full VIC-II state with interpreted values.
+
+Returns all VIC-II registers with semantic meaning:
+- Border and background colors (with names)
+- Graphics mode (text, bitmap, multicolor, etc.)
+- Screen and character memory locations
+- Scroll values
+- Raster position
+- Sprite enable bits
+
+This is the high-level view of the video chip. Use for understanding display configuration.
+
+Related tools: readScreen, readSprites, readMemory (for $D000-$D02E)`,
+  },
+  async () => {
+    try {
+      // Read all VIC registers $D000-$D02E (47 bytes)
+      const vicData = await client.readMemory(0xd000, 0xd02e);
+
+      // Read CIA2 for bank info
+      const cia2Data = await client.readMemory(0xdd00, 0xdd00);
+      const bankInfo = getVicBank(cia2Data[0]);
+
+      const d011 = vicData[0x11];
+      const d016 = vicData[0x16];
+      const d018 = vicData[0x18];
+
+      const graphicsMode = getGraphicsMode(d011, d016);
+      const videoAddrs = getVideoAddresses(d018, bankInfo.baseAddress);
+
+      // Raster position (9-bit)
+      const rasterLine = vicData[0x12] | ((d011 & 0x80) << 1);
+
+      // Sprite enable
+      const spriteEnable = vicData[0x15];
+      const enabledSprites = [];
+      for (let i = 0; i < 8; i++) {
+        if (spriteEnable & (1 << i)) enabledSprites.push(i);
+      }
+
+      // Display enable
+      const displayEnabled = !!(d011 & 0x10);
+
+      const response = {
+        // Colors
+        borderColor: getColorInfo(vicData[0x20]),
+        backgroundColor: [
+          getColorInfo(vicData[0x21]),
+          getColorInfo(vicData[0x22]),
+          getColorInfo(vicData[0x23]),
+          getColorInfo(vicData[0x24]),
+        ],
+
+        // Graphics mode
+        graphicsMode: graphicsMode.mode,
+        displayEnabled,
+        bitmap: graphicsMode.bitmap,
+        multicolor: graphicsMode.multicolor,
+        extendedColor: graphicsMode.extendedColor,
+
+        // Screen geometry
+        rows: d011 & 0x08 ? 25 : 24,
+        columns: d016 & 0x08 ? 40 : 38,
+        scrollX: d016 & 0x07,
+        scrollY: d011 & 0x07,
+
+        // Memory setup
+        vicBank: {
+          bank: bankInfo.bank,
+          baseAddress: {
+            value: bankInfo.baseAddress,
+            hex: `$${bankInfo.baseAddress.toString(16).padStart(4, "0")}`,
+          },
+        },
+        screenAddress: {
+          value: videoAddrs.screenAddress,
+          hex: `$${videoAddrs.screenAddress.toString(16).padStart(4, "0")}`,
+        },
+        charAddress: {
+          value: videoAddrs.charAddress,
+          hex: `$${videoAddrs.charAddress.toString(16).padStart(4, "0")}`,
+        },
+
+        // Raster
+        rasterLine,
+
+        // Sprites summary
+        spriteEnable: {
+          value: spriteEnable,
+          binary: spriteEnable.toString(2).padStart(8, "0"),
+          enabledSprites,
+          count: enabledSprites.length,
+        },
+
+        // Sprite multicolor registers
+        spriteMulticolor0: getColorInfo(vicData[0x25]),
+        spriteMulticolor1: getColorInfo(vicData[0x26]),
+
+        hint: !displayEnabled
+          ? "Display is blanked (DEN=0) - screen shows border color only"
+          : enabledSprites.length > 0
+          ? `${graphicsMode.mode} mode, ${enabledSprites.length} sprite(s) enabled. Use readSprites() for sprite details.`
+          : `${graphicsMode.mode} mode, no sprites enabled.`,
+      };
+
+      return formatResponse(response);
+    } catch (error) {
+      return formatError(error as ViceError);
+    }
+  }
+);
+
+// Tool: readSprites - Get detailed sprite state
+server.registerTool(
+  "readSprites",
+  {
+    description: `Read state of all 8 hardware sprites with interpreted values.
+
+Returns for each sprite:
+- Position (X, Y) with visibility check
+- Color (with name)
+- Enable status
+- Multicolor mode
+- X/Y expansion (double size)
+- Priority (in front of / behind background)
+- Data pointer address
+
+Use this to debug sprite issues like:
+- "Why is my sprite invisible?" → check enabled, position, pointer
+- "Wrong colors?" → check multicolor mode and color registers
+- "Wrong size?" → check expand flags
+
+Options:
+- enabledOnly: Only return enabled sprites (default: false)
+
+Related tools: readVicState, readMemory (for sprite data)`,
+    inputSchema: z.object({
+      enabledOnly: z
+        .boolean()
+        .optional()
+        .describe("Only return enabled sprites (default: false)"),
+    }),
+  },
+  async (args) => {
+    try {
+      // Read VIC registers
+      const vicData = await client.readMemory(0xd000, 0xd02e);
+
+      // Read CIA2 for bank info (needed for sprite pointer calculation)
+      const cia2Data = await client.readMemory(0xdd00, 0xdd00);
+      const bankInfo = getVicBank(cia2Data[0]);
+
+      // Get screen address for sprite pointers
+      const d018 = vicData[0x18];
+      const videoAddrs = getVideoAddresses(d018, bankInfo.baseAddress);
+
+      // Sprite pointers are at screen + $3F8
+      const spritePointerBase = videoAddrs.screenAddress + 0x3f8;
+      const spritePointers = await client.readMemory(
+        spritePointerBase,
+        spritePointerBase + 7
+      );
+
+      const spriteEnable = vicData[0x15];
+      const spriteXMsb = vicData[0x10];
+      const spriteYExpand = vicData[0x17];
+      const spriteXExpand = vicData[0x1d];
+      const spriteMulticolor = vicData[0x1c];
+      const spritePriority = vicData[0x1b];
+
+      const sprites = [];
+
+      for (let i = 0; i < 8; i++) {
+        const enabled = !!(spriteEnable & (1 << i));
+
+        // Skip disabled sprites if enabledOnly
+        if (args.enabledOnly && !enabled) continue;
+
+        // X position (9-bit)
+        const xLow = vicData[i * 2];
+        const xHigh = (spriteXMsb & (1 << i)) ? 256 : 0;
+        const x = xLow + xHigh;
+
+        // Y position (8-bit)
+        const y = vicData[i * 2 + 1];
+
+        const visibility = isSpriteVisible(x, y, enabled);
+
+        // Sprite data address
+        const pointer = spritePointers[i];
+        const dataAddress = bankInfo.baseAddress + pointer * 64;
+
+        sprites.push({
+          index: i,
+          enabled,
+          position: {
+            x,
+            y,
+            visible: visibility.visible,
+            visibilityReason: visibility.reason,
+          },
+          color: getColorInfo(vicData[0x27 + i]),
+          multicolor: !!(spriteMulticolor & (1 << i)),
+          expandX: !!(spriteXExpand & (1 << i)),
+          expandY: !!(spriteYExpand & (1 << i)),
+          priority: (spritePriority & (1 << i)) ? "behind" : "front",
+          pointer: {
+            value: pointer,
+            hex: `$${pointer.toString(16).padStart(2, "0")}`,
+          },
+          dataAddress: {
+            value: dataAddress,
+            hex: `$${dataAddress.toString(16).padStart(4, "0")}`,
+          },
+        });
+      }
+
+      const enabledCount = sprites.filter((s) => s.enabled).length;
+      const visibleCount = sprites.filter((s) => s.position.visible).length;
+      const issues = sprites
+        .filter((s) => s.enabled && !s.position.visible)
+        .map((s) => `Sprite ${s.index}: ${s.position.visibilityReason}`);
+
+      return formatResponse({
+        count: sprites.length,
+        enabledCount,
+        visibleCount,
+        sprites,
+        spriteMulticolor0: getColorInfo(vicData[0x25]),
+        spriteMulticolor1: getColorInfo(vicData[0x26]),
+        issues: issues.length > 0 ? issues : undefined,
+        hint:
+          issues.length > 0
+            ? `${issues.length} enabled sprite(s) not visible: ${issues[0]}`
+            : enabledCount === 0
+            ? "No sprites enabled"
+            : `${enabledCount} sprite(s) enabled, ${visibleCount} visible`,
+      });
+    } catch (error) {
+      return formatError(error as ViceError);
+    }
   }
 );
 
