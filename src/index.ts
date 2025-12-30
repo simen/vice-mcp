@@ -673,10 +673,15 @@ Note: This reads from the current screen RAM location (may not be $0400 if the p
 In bitmap modes, the data won't represent text.
 
 Options:
+- format: "full" (default) returns all 25 lines, "summary" returns only non-empty lines
 - includeRaw: Also return raw screen codes (default: false)
 
 Related tools: readColorRam, readVicState, readMemory`,
     inputSchema: z.object({
+      format: z
+        .enum(["full", "summary"])
+        .optional()
+        .describe("Output format: 'full' (all 25 lines) or 'summary' (non-empty lines only)"),
       includeRaw: z
         .boolean()
         .optional()
@@ -707,21 +712,36 @@ Related tools: readColorRam, readVicState, readMemory`,
         .map((line, idx) => ({ line: idx, content: line }))
         .filter((l) => l.content.trim().length > 0);
 
+      const useSummaryFormat = args.format === "summary";
+
       const response: Record<string, unknown> = {
         screenAddress: {
           value: videoAddrs.screenAddress,
           hex: `$${videoAddrs.screenAddress.toString(16).padStart(4, "0")}`,
         },
         vicBank: bankInfo.bank,
-        lines: textLines,
-        summary: {
+        format: useSummaryFormat ? "summary" : "full",
+      };
+
+      if (useSummaryFormat) {
+        // Summary format: only non-empty lines with line numbers
+        response.lines = nonEmptyLines.map((l) => ({
+          lineNumber: l.line,
+          content: l.content,
+        }));
+        response.totalLines = 25;
+        response.nonEmptyCount = nonEmptyLines.length;
+      } else {
+        // Full format: all 25 lines
+        response.lines = textLines;
+        response.summary = {
           nonEmptyLines: nonEmptyLines.length,
           preview:
             nonEmptyLines.length > 0
               ? nonEmptyLines.slice(0, 3).map((l) => `Line ${l.line}: "${l.content}"`)
               : ["Screen appears empty"],
-        },
-      };
+        };
+      }
 
       if (args.includeRaw) {
         response.raw = Array.from(screenData);
@@ -863,11 +883,25 @@ Related tools: readScreen, readSprites, readMemory (for $D000-$D02E)`,
       // Raster position (9-bit)
       const rasterLine = vicData[0x12] | ((d011 & 0x80) << 1);
 
-      // Sprite enable
+      // Sprite enable and visibility check
       const spriteEnable = vicData[0x15];
-      const enabledSprites = [];
+      const spriteXMsb = vicData[0x10];
+      const enabledSprites: number[] = [];
+      const visibleSprites: number[] = [];
+
       for (let i = 0; i < 8; i++) {
-        if (spriteEnable & (1 << i)) enabledSprites.push(i);
+        if (spriteEnable & (1 << i)) {
+          enabledSprites.push(i);
+          // Check visibility
+          const xLow = vicData[i * 2];
+          const xHigh = (spriteXMsb & (1 << i)) ? 256 : 0;
+          const x = xLow + xHigh;
+          const y = vicData[i * 2 + 1];
+          const visibility = isSpriteVisible(x, y, true);
+          if (visibility.visible) {
+            visibleSprites.push(i);
+          }
+        }
       }
 
       // Display enable
@@ -921,7 +955,9 @@ Related tools: readScreen, readSprites, readMemory (for $D000-$D02E)`,
           value: spriteEnable,
           binary: spriteEnable.toString(2).padStart(8, "0"),
           enabledSprites,
-          count: enabledSprites.length,
+          enabledCount: enabledSprites.length,
+          visibleSprites,
+          visibleCount: visibleSprites.length,
         },
 
         // Sprite multicolor registers
@@ -931,7 +967,9 @@ Related tools: readScreen, readSprites, readMemory (for $D000-$D02E)`,
         hint: !displayEnabled
           ? "Display is blanked (DEN=0) - screen shows border color only"
           : enabledSprites.length > 0
-          ? `${graphicsMode.mode} mode, ${enabledSprites.length} sprite(s) enabled. Use readSprites() for sprite details.`
+          ? visibleSprites.length < enabledSprites.length
+            ? `${graphicsMode.mode} mode, ${enabledSprites.length} sprite(s) enabled but only ${visibleSprites.length} visible. Use readSprites() for details.`
+            : `${graphicsMode.mode} mode, ${enabledSprites.length} sprite(s) enabled and visible.`
           : `${graphicsMode.mode} mode, no sprites enabled.`,
       };
 
