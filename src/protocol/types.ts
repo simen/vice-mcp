@@ -2,7 +2,7 @@
 
 // API Constants
 export const STX = 0x02;
-export const API_VERSION = 0x01; // VICE 3.x uses API v1
+export const API_VERSION = 0x02; // VICE 3.5+ uses API v2 (required for DisplayGet, KeyboardFeed)
 
 // Command codes (per official VICE manual: https://vice-emu.sourceforge.io/vice_13.html)
 export enum Command {

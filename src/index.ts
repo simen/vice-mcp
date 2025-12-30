@@ -11,6 +11,7 @@ import {
   getVideoAddresses,
   getGraphicsMode,
   isSpriteVisible,
+  validateSpriteDataAddress,
   disassemble,
   getLabelForAddress,
 } from "./utils/index.js";
@@ -1434,9 +1435,10 @@ Related tools: readVicState, readMemory (for sprite data)`,
 
         const visibility = isSpriteVisible(x, y, enabled);
 
-        // Sprite data address
+        // Sprite data address with region validation
         const pointer = spritePointers[i];
         const dataAddress = bankInfo.baseAddress + pointer * 64;
+        const addressInfo = validateSpriteDataAddress(dataAddress);
 
         sprites.push({
           index: i,
@@ -1459,15 +1461,39 @@ Related tools: readVicState, readMemory (for sprite data)`,
           dataAddress: {
             value: dataAddress,
             hex: `$${dataAddress.toString(16).padStart(4, "0")}`,
+            region: addressInfo.region,
+            severity: addressInfo.severity,
+            warning: addressInfo.warning,
           },
         });
       }
 
       const enabledCount = sprites.filter((s) => s.enabled).length;
       const visibleCount = sprites.filter((s) => s.position.visible).length;
-      const issues = sprites
+
+      // Collect visibility issues
+      const visibilityIssues = sprites
         .filter((s) => s.enabled && !s.position.visible)
         .map((s) => `Sprite ${s.index}: ${s.position.visibilityReason}`);
+
+      // Collect data address issues (warnings and errors)
+      const addressIssues = sprites
+        .filter((s) => s.enabled && s.dataAddress.warning)
+        .map((s) => `Sprite ${s.index}: ${s.dataAddress.warning} (${s.dataAddress.hex})`);
+
+      const allIssues = [...visibilityIssues, ...addressIssues];
+
+      // Build hint based on most critical issue
+      let hint: string;
+      if (addressIssues.length > 0) {
+        hint = `⚠️ ${addressIssues.length} sprite(s) with suspicious data address: ${addressIssues[0]}`;
+      } else if (visibilityIssues.length > 0) {
+        hint = `${visibilityIssues.length} enabled sprite(s) not visible: ${visibilityIssues[0]}`;
+      } else if (enabledCount === 0) {
+        hint = "No sprites enabled";
+      } else {
+        hint = `${enabledCount} sprite(s) enabled, ${visibleCount} visible`;
+      }
 
       return formatResponse({
         count: sprites.length,
@@ -1476,13 +1502,8 @@ Related tools: readVicState, readMemory (for sprite data)`,
         sprites,
         spriteMulticolor0: getColorInfo(vicData[0x25]),
         spriteMulticolor1: getColorInfo(vicData[0x26]),
-        issues: issues.length > 0 ? issues : undefined,
-        hint:
-          issues.length > 0
-            ? `${issues.length} enabled sprite(s) not visible: ${issues[0]}`
-            : enabledCount === 0
-            ? "No sprites enabled"
-            : `${enabledCount} sprite(s) enabled, ${visibleCount} visible`,
+        issues: allIssues.length > 0 ? allIssues : undefined,
+        hint,
       });
     } catch (error) {
       return formatError(error as ViceError);

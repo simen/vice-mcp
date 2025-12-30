@@ -178,3 +178,100 @@ export function describeAddress(address: number): string {
   if (address >= 0xe000) return "KERNAL ROM / RAM";
   return "";
 }
+
+// Severity levels for address validation
+export type AddressSeverity = "ok" | "warning" | "error";
+
+// Sprite data address validation
+// Returns region info and severity for sprite data addresses
+export interface SpriteDataAddressInfo {
+  region: string;
+  severity: AddressSeverity;
+  warning?: string;
+}
+
+export function validateSpriteDataAddress(address: number): SpriteDataAddressInfo {
+  // Zero page - very wrong for sprite data
+  if (address < 0x0100) {
+    return {
+      region: "Zero page",
+      severity: "error",
+      warning: "Sprite data in zero page - likely wrong pointer",
+    };
+  }
+
+  // Stack - definitely wrong
+  if (address < 0x0200) {
+    return {
+      region: "Stack",
+      severity: "error",
+      warning: "Sprite data in stack area - definitely wrong",
+    };
+  }
+
+  // BASIC program area - might conflict with code
+  if (address >= 0x0801 && address < 0x2000) {
+    return {
+      region: "BASIC program area",
+      severity: "warning",
+      warning: "Sprite data in BASIC area - may conflict with program",
+    };
+  }
+
+  // Default screen RAM - usually wrong
+  if (address >= 0x0400 && address < 0x0800) {
+    return {
+      region: "Default screen RAM",
+      severity: "warning",
+      warning: "Sprite data in screen RAM - probably wrong",
+    };
+  }
+
+  // Common sprite data areas - OK
+  if (address >= 0x2000 && address < 0x4000) {
+    return {
+      region: "Common sprite area",
+      severity: "ok",
+    };
+  }
+
+  // VIC bank 1 sprite area - OK
+  if (address >= 0x4000 && address < 0x8000) {
+    return {
+      region: "VIC bank 1 sprite area",
+      severity: "ok",
+    };
+  }
+
+  // VIC bank 2 - has ROM shadow issues
+  if (address >= 0x8000 && address < 0xc000) {
+    return {
+      region: "VIC bank 2",
+      severity: "ok",
+    };
+  }
+
+  // I/O area - cannot store sprite data here
+  if (address >= 0xd000 && address < 0xe000) {
+    return {
+      region: "I/O space",
+      severity: "error",
+      warning: "Cannot store sprite data in I/O space",
+    };
+  }
+
+  // High memory - ROM shadow area
+  if (address >= 0xe000) {
+    return {
+      region: "KERNAL ROM area",
+      severity: "warning",
+      warning: "Sprite data may conflict with KERNAL ROM shadow",
+    };
+  }
+
+  // Other areas
+  return {
+    region: describeAddress(address) || "RAM",
+    severity: "ok",
+  };
+}

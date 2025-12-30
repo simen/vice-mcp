@@ -455,13 +455,16 @@ export class ViceClient {
     // Ensure VICE is stopped before memory write
     await this.ensureStopped();
 
-    // Build request: side_effects(1) + start(2) + memspace(1) + length-1(1) + data(N)
-    const body = Buffer.alloc(5 + dataBuffer.length);
+    // Build request per official VICE docs:
+    // side_effects(1) + start(2) + end(2) + memspace(1) + bankId(2) + data(N) = 8 byte header + data
+    const endAddress = address + dataBuffer.length - 1;
+    const body = Buffer.alloc(8 + dataBuffer.length);
     body[0] = 0; // No side effects
     body.writeUInt16LE(address, 1);
-    body[3] = memspace;
-    body[4] = dataBuffer.length - 1;
-    dataBuffer.copy(body, 5);
+    body.writeUInt16LE(endAddress, 3);
+    body[5] = memspace;
+    body.writeUInt16LE(0, 6); // bankId = 0 (default bank)
+    dataBuffer.copy(body, 8);
 
     await this.sendCommand(Command.MemorySet, body);
   }
@@ -509,6 +512,7 @@ export class ViceClient {
   }
 
   async step(count = 1, stepOver = false): Promise<ViceResponse> {
+    // Uses AdvanceInstructions (0x71) - there is no separate Step command in VICE
     const body = Buffer.alloc(3);
     body[0] = stepOver ? 1 : 0;
     body.writeUInt16LE(count, 1);
@@ -518,6 +522,7 @@ export class ViceClient {
   }
 
   async advanceInstructions(count: number, stepOver = false): Promise<ViceResponse> {
+    // Alias for step() - kept for API compatibility
     const body = Buffer.alloc(3);
     body[0] = stepOver ? 1 : 0;
     body.writeUInt16LE(count, 1);
