@@ -386,8 +386,8 @@ export class ViceClient {
     body[3] = memspace;
     body.writeUInt16LE(endAddress, 4);
 
-    // VICE may send MemoryGet (0x31) as async event with ReqID=0xff
-    const response = await this.sendCommand(Command.MemoryGet, body, ResponseType.MemoryGet);
+    // Try without async matching - maybe VICE sends MemoryGet with matched ReqID
+    const response = await this.sendCommand(Command.MemoryGet, body);
 
     // Response body: length(2) + data(N)
     const dataLength = response.body.readUInt16LE(0);
