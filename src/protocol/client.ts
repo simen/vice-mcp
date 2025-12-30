@@ -350,6 +350,27 @@ export class ViceClient {
     });
   }
 
+  // Ensure VICE is in stopped state before operations that require it
+  // On first command after connect, VICE stops emulation and sends async events
+  // but may not process the command itself. Calling this first ensures VICE is ready.
+  private stoppedConfirmed = false;
+
+  private async ensureStopped(): Promise<void> {
+    if (this.stoppedConfirmed && !this.state.running) {
+      return; // Already confirmed stopped
+    }
+
+    // Send RegistersGet to trigger stop and wait for response
+    // This ensures VICE has fully stopped and is ready to process commands
+    debugLog("ensureStopped: sending RegistersGet to confirm stopped state");
+    const body = Buffer.alloc(1);
+    body[0] = MemorySpace.MainCPU;
+    await this.sendCommand(Command.RegistersGet, body, ResponseType.RegisterInfo);
+    this.stoppedConfirmed = true;
+    this.state.running = false;
+    debugLog("ensureStopped: VICE confirmed stopped");
+  }
+
   // High-level commands
 
   async readMemory(
@@ -379,6 +400,9 @@ export class ViceClient {
         "Swap the addresses or check your range"
       );
     }
+
+    // Ensure VICE is stopped before memory read
+    await this.ensureStopped();
 
     // Build request per official VICE docs:
     // side_effects(1) + start(2) + end(2) + memspace(1) + bankId(2) = 8 bytes
@@ -427,6 +451,9 @@ export class ViceClient {
         "Reduce data length or use a lower start address"
       );
     }
+
+    // Ensure VICE is stopped before memory write
+    await this.ensureStopped();
 
     // Build request: side_effects(1) + start(2) + memspace(1) + length-1(1) + data(N)
     const body = Buffer.alloc(5 + dataBuffer.length);
@@ -478,6 +505,7 @@ export class ViceClient {
     // Exit command (0xaa) resumes execution
     await this.sendCommand(Command.Exit);
     this.state.running = true;
+    this.stoppedConfirmed = false; // Need to re-confirm stopped state after resume
   }
 
   async step(count = 1, stepOver = false): Promise<ViceResponse> {
