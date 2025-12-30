@@ -1490,6 +1490,148 @@ Related tools: readVicState, readMemory (for sprite data)`,
   }
 );
 
+// =============================================================================
+// VISUAL FEEDBACK TOOLS - Display capture and rendering
+// =============================================================================
+
+// Tool: screenshot - Capture display as PNG
+server.registerTool(
+  "screenshot",
+  {
+    description: `Capture the current VICE display as image data.
+
+Returns the raw display buffer with:
+- Pixel data (indexed 8-bit palette colors)
+- Display dimensions and visible area
+- Current palette RGB values
+
+The data can be used to understand what's currently on screen visually.
+For text mode screens, readScreen provides a simpler text representation.
+
+Options:
+- includePalette: Also return the color palette (default: true)
+
+Related tools: readScreen, readVicState`,
+    inputSchema: z.object({
+      includePalette: z.boolean().optional().describe("Include palette RGB values (default: true)"),
+    }),
+  },
+  async (args) => {
+    try {
+      const display = await client.getDisplay();
+
+      const response: Record<string, unknown> = {
+        width: display.width,
+        height: display.height,
+        bitsPerPixel: display.bitsPerPixel,
+        visibleArea: {
+          offsetX: display.offsetX,
+          offsetY: display.offsetY,
+          innerWidth: display.innerWidth,
+          innerHeight: display.innerHeight,
+        },
+        pixelCount: display.pixels.length,
+        // Return pixels as base64 for efficient transfer
+        pixelsBase64: display.pixels.toString("base64"),
+      };
+
+      if (args.includePalette !== false) {
+        const palette = await client.getPalette();
+        response.palette = palette;
+        response.paletteCount = palette.length;
+      }
+
+      response.hint = `Display is ${display.width}x${display.height} (visible: ${display.innerWidth}x${display.innerHeight}). Use readScreen() for text mode content.`;
+
+      return formatResponse(response);
+    } catch (error) {
+      return formatError(error as ViceError);
+    }
+  }
+);
+
+// Tool: renderScreen - ASCII art screen rendering
+server.registerTool(
+  "renderScreen",
+  {
+    description: `Render the current screen as ASCII art representation.
+
+Creates a visual representation of the screen using ASCII characters
+to approximate the colors and content visible on the C64 display.
+
+This is useful for quick visual debugging without image handling.
+For actual screen text, use readScreen instead.
+
+Options:
+- width: Output width in characters (default: 80)
+- height: Output height in lines (default: 50)
+- charset: Character set to use for shading (default: " .:-=+*#%@")
+
+Related tools: readScreen, screenshot, readVicState`,
+    inputSchema: z.object({
+      width: z.number().min(20).max(200).optional().describe("Output width in characters (default: 80)"),
+      height: z.number().min(10).max(100).optional().describe("Output height in lines (default: 50)"),
+      charset: z.string().optional().describe("Characters for shading from dark to light (default: ' .:-=+*#%@')"),
+    }),
+  },
+  async (args) => {
+    try {
+      const display = await client.getDisplay();
+      const palette = await client.getPalette();
+
+      const outputWidth = args.width || 80;
+      const outputHeight = args.height || 50;
+      const charset = args.charset || " .:-=+*#%@";
+
+      // Calculate luminance for each palette color
+      const luminance = palette.map((c) => {
+        // Standard luminance formula
+        return 0.299 * c.r + 0.587 * c.g + 0.114 * c.b;
+      });
+
+      // Sample the display and convert to ASCII
+      const scaleX = display.innerWidth / outputWidth;
+      const scaleY = display.innerHeight / outputHeight;
+
+      const lines: string[] = [];
+
+      for (let y = 0; y < outputHeight; y++) {
+        let line = "";
+        for (let x = 0; x < outputWidth; x++) {
+          // Sample pixel from display
+          const srcX = Math.floor(display.offsetX + x * scaleX);
+          const srcY = Math.floor(display.offsetY + y * scaleY);
+          const pixelIndex = srcY * display.width + srcX;
+
+          if (pixelIndex < display.pixels.length) {
+            const colorIndex = display.pixels[pixelIndex];
+            const lum = colorIndex < luminance.length ? luminance[colorIndex] : 0;
+
+            // Map luminance (0-255) to charset index
+            const charIndex = Math.floor((lum / 256) * charset.length);
+            line += charset[Math.min(charIndex, charset.length - 1)];
+          } else {
+            line += " ";
+          }
+        }
+        lines.push(line);
+      }
+
+      return formatResponse({
+        width: outputWidth,
+        height: outputHeight,
+        sourceWidth: display.innerWidth,
+        sourceHeight: display.innerHeight,
+        charset,
+        render: lines.join("\n"),
+        hint: `ASCII rendering of ${display.innerWidth}x${display.innerHeight} display scaled to ${outputWidth}x${outputHeight}`,
+      });
+    } catch (error) {
+      return formatError(error as ViceError);
+    }
+  }
+);
+
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);

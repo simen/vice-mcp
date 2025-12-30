@@ -618,6 +618,71 @@ export class ViceClient {
     filenameBuffer.copy(body, 4);
     await this.sendCommand(Command.AutoStart, body);
   }
+
+  // Get display buffer (screenshot data)
+  async getDisplay(useVicii = true): Promise<{
+    width: number;
+    height: number;
+    bitsPerPixel: number;
+    offsetX: number;
+    offsetY: number;
+    innerWidth: number;
+    innerHeight: number;
+    pixels: Buffer;
+  }> {
+    // Body: useVicii(1) + format(1)
+    // Format: 0 = indexed 8-bit
+    const body = Buffer.alloc(2);
+    body[0] = useVicii ? 1 : 0;
+    body[1] = 0; // 8-bit indexed
+
+    const response = await this.sendCommand(Command.DisplayGet, body);
+
+    // Parse response
+    // Response: length(4) + width(4) + height(4) + bpp(1) + offsetX(4) + offsetY(4) +
+    //           innerWidth(4) + innerHeight(4) + pixels...
+    const dataLength = response.body.readUInt32LE(0);
+    const width = response.body.readUInt32LE(4);
+    const height = response.body.readUInt32LE(8);
+    const bitsPerPixel = response.body[12];
+    const offsetX = response.body.readUInt32LE(13);
+    const offsetY = response.body.readUInt32LE(17);
+    const innerWidth = response.body.readUInt32LE(21);
+    const innerHeight = response.body.readUInt32LE(25);
+    const pixels = response.body.subarray(29, 29 + dataLength);
+
+    return {
+      width,
+      height,
+      bitsPerPixel,
+      offsetX,
+      offsetY,
+      innerWidth,
+      innerHeight,
+      pixels,
+    };
+  }
+
+  // Get palette (color table)
+  async getPalette(): Promise<Array<{ r: number; g: number; b: number }>> {
+    const response = await this.sendCommand(Command.PaletteGet);
+
+    // Parse response
+    // Response: count(2) + [r(1) + g(1) + b(1)]...
+    const count = response.body.readUInt16LE(0);
+    const colors: Array<{ r: number; g: number; b: number }> = [];
+
+    for (let i = 0; i < count; i++) {
+      const offset = 2 + i * 3;
+      colors.push({
+        r: response.body[offset],
+        g: response.body[offset + 1],
+        b: response.body[offset + 2],
+      });
+    }
+
+    return colors;
+  }
 }
 
 // Singleton instance

@@ -39,6 +39,10 @@ export enum Command {
   // Quit
   Quit = 0xbb,
 
+  // Display
+  DisplayGet = 0x84,
+  PaletteGet = 0x91,
+
   // Autostart
   AutoStart = 0xdd,
 }
