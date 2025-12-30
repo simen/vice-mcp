@@ -785,7 +785,7 @@ Related tools: setWatchpoint, deleteBreakpoint, listBreakpoints`,
         enabled: wp.enabled,
         temporary: wp.temporary,
       })),
-      hint: `${watchpoints.length} watchpoint(s) active. Use deleteBreakpoint(id) to remove.`,
+      hint: `${watchpoints.length} watchpoint(s) active. Use deleteBreakpoint(id) to remove (works for both breakpoints and watchpoints).`,
     });
   }
 );
