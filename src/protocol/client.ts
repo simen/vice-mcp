@@ -169,6 +169,7 @@ export class ViceClient {
 
     // Process complete packets
     // Response header: STX(1) + API(1) + bodyLength(4) + responseType(1) + errorCode(1) + requestId(1) = 9 bytes
+    // Then body of `bodyLength` bytes follows
     while (this.responseBuffer.length >= 9) {
       const stx = this.responseBuffer[0];
       if (stx !== STX) {
@@ -179,7 +180,7 @@ export class ViceClient {
       }
 
       const bodyLength = this.responseBuffer.readUInt32LE(2);
-      const totalLength = 6 + bodyLength; // Header prefix (6) + body (which includes type, error, reqId)
+      const totalLength = 9 + bodyLength; // Header (9) + body
 
       debugLog(`Packet: bodyLength=${bodyLength}, totalLength=${totalLength}, bufferLen=${this.responseBuffer.length}`);
 
@@ -272,11 +273,11 @@ export class ViceClient {
     const requestId = this.nextRequestId();
 
     // Build packet: STX(1) + API(1) + Length(4) + RequestID(1) + Command(1) + Body
-    // Length field includes: RequestID(1) + Command(1) + Body
+    // Length field is ONLY the command body, NOT including ReqID or Command
     const header = Buffer.alloc(8);
     header[0] = STX;
     header[1] = API_VERSION;
-    header.writeUInt32LE(body.length + 2, 2); // Body length includes request ID (1) and command (1)
+    header.writeUInt32LE(body.length, 2); // Just the command body length
     header[6] = requestId;
     header[7] = command;
 
