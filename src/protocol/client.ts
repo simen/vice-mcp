@@ -198,7 +198,11 @@ export class ViceClient {
       const body = this.responseBuffer.subarray(12, totalLength);
 
       debugLog(`Parsed response: type=0x${responseType.toString(16)}, error=0x${errorCode.toString(16)}, reqId=${requestId}`);
-      debugLog("Response body", body);
+      if (body.length < 1000) {
+        debugLog("Response body", body);
+      } else {
+        debugLog(`Response body: ${body.length} bytes (too large to log)`);
+      }
 
       const response: ViceResponse = {
         responseType,
