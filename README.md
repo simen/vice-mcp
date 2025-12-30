@@ -58,6 +58,39 @@ npm run build
 npm start
 ```
 
+## Claude Code Installation
+
+The quickest way to get started with Claude Code:
+
+**1. Start VICE with binary monitor:**
+```bash
+x64sc -binarymonitor -binarymonitoraddress ip4://127.0.0.1:6502
+```
+
+**2. Add the MCP server:**
+```bash
+claude mcp add vice-mcp -- npx github:simen/vice-mcp
+```
+
+**3. Restart Claude Code** to load the new MCP server.
+
+That's it! You can now ask Claude Code to debug your C64 programs.
+
+### Manual Configuration
+
+Alternatively, add to `~/.claude/claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "vice-mcp": {
+      "command": "npx",
+      "args": ["github:simen/vice-mcp"]
+    }
+  }
+}
+```
+
 ## Configuration
 
 Add to your MCP client configuration (e.g., Claude Desktop, Cursor, or custom agent):
