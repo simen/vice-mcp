@@ -512,7 +512,7 @@ export class ViceClient {
     const body = Buffer.alloc(3);
     body[0] = stepOver ? 1 : 0;
     body.writeUInt16LE(count, 1);
-    const response = await this.sendCommand(Command.Step, body);
+    const response = await this.sendCommand(Command.AdvanceInstructions, body);
     this.state.running = false;
     return response;
   }
