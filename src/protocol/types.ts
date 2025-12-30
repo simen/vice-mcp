@@ -4,27 +4,25 @@
 export const STX = 0x02;
 export const API_VERSION = 0x01; // VICE 3.x uses API v1
 
-// Command codes (per KB docs)
+// Command codes (per official VICE manual)
 export enum Command {
   // Memory operations
   MemoryGet = 0x01,
   MemorySet = 0x02,
 
   // Checkpoint (breakpoint/watchpoint) operations
-  CheckpointSet = 0x11,
-  CheckpointGet = 0x12,
+  CheckpointGet = 0x11,
+  CheckpointSet = 0x12,
   CheckpointDelete = 0x13,
   CheckpointList = 0x14,
   CheckpointToggle = 0x15,
 
-  // Register operations
-  RegistersGet = 0x22,
-  RegistersSet = 0x23,
+  // Condition operations
+  ConditionSet = 0x22,
 
-  // Execution control
-  Continue = 0x31,
-  Step = 0x32,
-  Reset = 0x43,
+  // Register operations
+  RegistersGet = 0x31,
+  RegistersSet = 0x32,
 
   // Dump/Undump (snapshots)
   Dump = 0x41,
@@ -34,16 +32,27 @@ export enum Command {
   ResourceGet = 0x51,
   ResourceSet = 0x52,
 
-  // Exit
-  Exit = 0x71,
-
-  // Advanced execution
+  // Advance instructions
+  AdvanceInstructions = 0x71,
   KeyboardFeed = 0x72,
-  AdvanceInstructions = 0x73,
+
+  // Execution control
+  Step = 0x81,
+  Continue = 0x82,  // Also called "Exit" - resumes execution
+  Ping = 0x81,      // Same as step with count=0
 
   // Display
   DisplayGet = 0x84,
-  PaletteGet = 0x91,
+
+  // Banks
+  BanksAvailable = 0x83,
+
+  // Exit/Quit
+  Exit = 0xaa,
+  Quit = 0xbb,
+
+  // Reset
+  Reset = 0xcc,
 
   // Autostart
   AutoStart = 0xdd,
