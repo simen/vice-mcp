@@ -726,26 +726,31 @@ export class ViceClient {
     innerHeight: number;
     pixels: Buffer;
   }> {
+    // Ensure VICE is stopped before display capture
+    await this.ensureStopped();
+
     // Body: useVicii(1) + format(1)
     // Format: 0 = indexed 8-bit
     const body = Buffer.alloc(2);
     body[0] = useVicii ? 1 : 0;
     body[1] = 0; // 8-bit indexed
 
-    const response = await this.sendCommand(Command.DisplayGet, body);
+    // Response type is 0x84 (same as command)
+    const response = await this.sendCommand(Command.DisplayGet, body, ResponseType.DisplayGet);
 
-    // Parse response
-    // Response: length(4) + width(4) + height(4) + bpp(1) + offsetX(4) + offsetY(4) +
-    //           innerWidth(4) + innerHeight(4) + pixels...
-    const dataLength = response.body.readUInt32LE(0);
-    const width = response.body.readUInt32LE(4);
-    const height = response.body.readUInt32LE(8);
-    const bitsPerPixel = response.body[12];
-    const offsetX = response.body.readUInt32LE(13);
-    const offsetY = response.body.readUInt32LE(17);
-    const innerWidth = response.body.readUInt32LE(21);
-    const innerHeight = response.body.readUInt32LE(25);
-    const pixels = response.body.subarray(29, 29 + dataLength);
+    // Parse response per VICE docs:
+    // FL(4) + DW(2) + DH(2) + XO(2) + YO(2) + IW(2) + IH(2) + BP(1) + BL(4) + BD(BL)
+    // FL = length of fields before display buffer (should be 17)
+    // const fieldsLength = response.body.readUInt32LE(0); // Not used but documented
+    const width = response.body.readUInt16LE(4);          // DW - debug width
+    const height = response.body.readUInt16LE(6);         // DH - debug height
+    const offsetX = response.body.readUInt16LE(8);        // XO - x offset
+    const offsetY = response.body.readUInt16LE(10);       // YO - y offset
+    const innerWidth = response.body.readUInt16LE(12);    // IW - inner width
+    const innerHeight = response.body.readUInt16LE(14);   // IH - inner height
+    const bitsPerPixel = response.body[16];               // BP - bits per pixel
+    const bufferLength = response.body.readUInt32LE(17);  // BL - buffer length
+    const pixels = response.body.subarray(21, 21 + bufferLength); // BD - display buffer
 
     return {
       width,

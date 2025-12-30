@@ -77,6 +77,7 @@ export enum ResponseType {
   Undump = 0x42,
   ResourceGet = 0x51,
   ResourceSet = 0x52,
+  DisplayGet = 0x84,
 
   // Async event codes (sent by VICE unprompted)
   JAM = 0x61,                // CPU jam event
