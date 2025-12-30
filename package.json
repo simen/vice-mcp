@@ -9,6 +9,7 @@
     "vice-mcp": "dist/index.js"
   },
   "scripts": {
+    "prepare": "npm run build",
     "build": "tsup src/index.ts --format esm --dts --clean",
     "dev": "tsup src/index.ts --format esm --watch",
     "start": "node dist/index.js",
