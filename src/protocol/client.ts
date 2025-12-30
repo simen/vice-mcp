@@ -1,0 +1,436 @@
+// VICE Binary Monitor Client
+import { Socket } from "net";
+import {
+  STX,
+  API_VERSION,
+  Command,
+  ResponseType,
+  ErrorCode,
+  MemorySpace,
+  ViceResponse,
+  ConnectionState,
+} from "./types.js";
+
+export interface ViceError {
+  error: true;
+  code: string;
+  message: string;
+  suggestion?: string;
+}
+
+export class ViceClient {
+  private socket: Socket | null = null;
+  private requestId = 0;
+  private responseBuffer = Buffer.alloc(0);
+  private pendingRequests = new Map<
+    number,
+    {
+      resolve: (response: ViceResponse) => void;
+      reject: (error: ViceError) => void;
+    }
+  >();
+  private state: ConnectionState = {
+    connected: false,
+    host: "",
+    port: 0,
+    running: true,
+  };
+
+  // Event handlers for async events (breakpoints, etc.)
+  public onStopped?: (response: ViceResponse) => void;
+  public onResumed?: (response: ViceResponse) => void;
+
+  getState(): ConnectionState {
+    return { ...this.state };
+  }
+
+  async connect(host = "127.0.0.1", port = 6502): Promise<void> {
+    if (this.socket) {
+      throw this.makeError(
+        "ALREADY_CONNECTED",
+        "Already connected to VICE",
+        "Use disconnect() first if you want to reconnect"
+      );
+    }
+
+    return new Promise((resolve, reject) => {
+      this.socket = new Socket();
+
+      const timeout = setTimeout(() => {
+        this.socket?.destroy();
+        this.socket = null;
+        reject(
+          this.makeError(
+            "CONNECTION_TIMEOUT",
+            `Connection to ${host}:${port} timed out after 5 seconds`,
+            "Ensure VICE is running with -binarymonitor flag: x64sc -binarymonitor -binarymonitoraddress ip4://127.0.0.1:6502"
+          )
+        );
+      }, 5000);
+
+      this.socket.on("connect", () => {
+        clearTimeout(timeout);
+        this.state = { connected: true, host, port, running: true };
+        resolve();
+      });
+
+      this.socket.on("error", (err) => {
+        clearTimeout(timeout);
+        this.socket?.destroy();
+        this.socket = null;
+        this.state.connected = false;
+        reject(
+          this.makeError(
+            "CONNECTION_FAILED",
+            `Failed to connect to ${host}:${port}: ${err.message}`,
+            "Ensure VICE is running with -binarymonitor flag: x64sc -binarymonitor -binarymonitoraddress ip4://127.0.0.1:6502"
+          )
+        );
+      });
+
+      this.socket.on("close", () => {
+        this.state.connected = false;
+        this.socket = null;
+        // Reject all pending requests
+        for (const [, { reject: rejectFn }] of this.pendingRequests) {
+          rejectFn(
+            this.makeError(
+              "CONNECTION_CLOSED",
+              "Connection to VICE closed unexpectedly",
+              "VICE may have been closed or crashed. Try reconnecting."
+            )
+          );
+        }
+        this.pendingRequests.clear();
+      });
+
+      this.socket.on("data", (data) => this.handleData(data));
+
+      this.socket.connect(port, host);
+    });
+  }
+
+  async disconnect(): Promise<void> {
+    if (!this.socket) {
+      return;
+    }
+
+    return new Promise((resolve) => {
+      this.socket!.once("close", () => {
+        this.state.connected = false;
+        resolve();
+      });
+      this.socket!.end();
+    });
+  }
+
+  private makeError(code: string, message: string, suggestion?: string): ViceError {
+    return { error: true, code, message, suggestion };
+  }
+
+  private nextRequestId(): number {
+    this.requestId = (this.requestId + 1) & 0xff;
+    return this.requestId;
+  }
+
+  private handleData(data: Buffer): void {
+    this.responseBuffer = Buffer.concat([this.responseBuffer, data]);
+
+    // Process complete packets
+    while (this.responseBuffer.length >= 9) {
+      // Minimum header size
+      const stx = this.responseBuffer[0];
+      if (stx !== STX) {
+        // Protocol error, skip byte
+        this.responseBuffer = this.responseBuffer.subarray(1);
+        continue;
+      }
+
+      const bodyLength = this.responseBuffer.readUInt32LE(2);
+      const totalLength = 6 + bodyLength; // Header (6) + body
+
+      if (this.responseBuffer.length < totalLength) {
+        // Wait for more data
+        break;
+      }
+
+      // Parse complete packet
+      const responseType = this.responseBuffer[6] as ResponseType;
+      const errorCode = this.responseBuffer[7] as ErrorCode;
+      const requestId = this.responseBuffer[8];
+      const body = this.responseBuffer.subarray(9, totalLength);
+
+      const response: ViceResponse = {
+        responseType,
+        errorCode,
+        requestId,
+        body,
+      };
+
+      // Remove processed packet from buffer
+      this.responseBuffer = this.responseBuffer.subarray(totalLength);
+
+      // Handle response
+      this.handleResponse(response);
+    }
+  }
+
+  private handleResponse(response: ViceResponse): void {
+    // Check for async events
+    if (response.responseType === ResponseType.Stopped || response.responseType === ResponseType.CheckpointHit) {
+      this.state.running = false;
+      this.onStopped?.(response);
+      return;
+    }
+
+    if (response.responseType === ResponseType.Resumed) {
+      this.state.running = true;
+      this.onResumed?.(response);
+      return;
+    }
+
+    // Match to pending request
+    const pending = this.pendingRequests.get(response.requestId);
+    if (pending) {
+      this.pendingRequests.delete(response.requestId);
+      if (response.errorCode !== ErrorCode.Ok) {
+        pending.reject(
+          this.makeError(
+            `VICE_ERROR_${response.errorCode}`,
+            `VICE returned error code ${response.errorCode}`,
+            this.getErrorSuggestion(response.errorCode)
+          )
+        );
+      } else {
+        pending.resolve(response);
+      }
+    }
+  }
+
+  private getErrorSuggestion(code: ErrorCode): string {
+    switch (code) {
+      case ErrorCode.ObjectMissing:
+        return "The requested object (checkpoint, etc.) does not exist";
+      case ErrorCode.InvalidMemspace:
+        return "Invalid memory space specified. Use 0 for main CPU memory.";
+      case ErrorCode.InvalidCmdLength:
+        return "Command packet has invalid length - this is likely a protocol bug";
+      case ErrorCode.InvalidParameter:
+        return "Invalid parameter value - check address ranges (0x0000-0xFFFF for C64)";
+      default:
+        return "Check VICE console for more details";
+    }
+  }
+
+  private async sendCommand(command: Command, body: Buffer = Buffer.alloc(0)): Promise<ViceResponse> {
+    if (!this.socket || !this.state.connected) {
+      throw this.makeError(
+        "NOT_CONNECTED",
+        "Not connected to VICE",
+        "Use connect() first to establish connection"
+      );
+    }
+
+    const requestId = this.nextRequestId();
+
+    // Build packet: STX (1) + API (1) + Length (4) + RequestID (1) + Command (1) + Body
+    const header = Buffer.alloc(8);
+    header[0] = STX;
+    header[1] = API_VERSION;
+    header.writeUInt32LE(body.length + 2, 2); // Body length includes request ID and command
+    header[6] = requestId;
+    header[7] = command;
+
+    const packet = Buffer.concat([header, body]);
+
+    return new Promise((resolve, reject) => {
+      this.pendingRequests.set(requestId, { resolve, reject });
+
+      this.socket!.write(packet, (err) => {
+        if (err) {
+          this.pendingRequests.delete(requestId);
+          reject(
+            this.makeError(
+              "SEND_FAILED",
+              `Failed to send command: ${err.message}`,
+              "Connection may have been lost. Try reconnecting."
+            )
+          );
+        }
+      });
+
+      // Timeout for response
+      setTimeout(() => {
+        if (this.pendingRequests.has(requestId)) {
+          this.pendingRequests.delete(requestId);
+          reject(
+            this.makeError(
+              "RESPONSE_TIMEOUT",
+              "Timeout waiting for VICE response",
+              "VICE may be busy or unresponsive. Try again or reconnect."
+            )
+          );
+        }
+      }, 10000);
+    });
+  }
+
+  // High-level commands
+
+  async readMemory(
+    startAddress: number,
+    endAddress: number,
+    memspace: MemorySpace = MemorySpace.MainCPU
+  ): Promise<Buffer> {
+    // Validate addresses
+    if (startAddress < 0 || startAddress > 0xffff) {
+      throw this.makeError(
+        "INVALID_ADDRESS",
+        `Start address 0x${startAddress.toString(16)} is outside C64 memory range`,
+        "C64 addresses are 16-bit (0x0000-0xFFFF)"
+      );
+    }
+    if (endAddress < 0 || endAddress > 0xffff) {
+      throw this.makeError(
+        "INVALID_ADDRESS",
+        `End address 0x${endAddress.toString(16)} is outside C64 memory range`,
+        "C64 addresses are 16-bit (0x0000-0xFFFF)"
+      );
+    }
+    if (startAddress > endAddress) {
+      throw this.makeError(
+        "INVALID_RANGE",
+        `Start address (0x${startAddress.toString(16)}) is greater than end address (0x${endAddress.toString(16)})`,
+        "Swap the addresses or check your range"
+      );
+    }
+
+    // Build request: side_effects(1) + start(2) + memspace(1) + end(2)
+    const body = Buffer.alloc(6);
+    body[0] = 0; // No side effects
+    body.writeUInt16LE(startAddress, 1);
+    body[3] = memspace;
+    body.writeUInt16LE(endAddress, 4);
+
+    const response = await this.sendCommand(Command.MemoryGet, body);
+
+    // Response body: length(2) + data(N)
+    const dataLength = response.body.readUInt16LE(0);
+    return response.body.subarray(2, 2 + dataLength);
+  }
+
+  async writeMemory(
+    address: number,
+    data: Buffer | number[],
+    memspace: MemorySpace = MemorySpace.MainCPU
+  ): Promise<void> {
+    const dataBuffer = Buffer.isBuffer(data) ? data : Buffer.from(data);
+
+    if (address < 0 || address > 0xffff) {
+      throw this.makeError(
+        "INVALID_ADDRESS",
+        `Address 0x${address.toString(16)} is outside C64 memory range`,
+        "C64 addresses are 16-bit (0x0000-0xFFFF)"
+      );
+    }
+
+    if (dataBuffer.length === 0) {
+      throw this.makeError(
+        "INVALID_DATA",
+        "Cannot write empty data",
+        "Provide at least one byte to write"
+      );
+    }
+
+    if (address + dataBuffer.length > 0x10000) {
+      throw this.makeError(
+        "INVALID_RANGE",
+        `Write would extend past end of memory (0x${address.toString(16)} + ${dataBuffer.length} bytes)`,
+        "Reduce data length or use a lower start address"
+      );
+    }
+
+    // Build request: side_effects(1) + start(2) + memspace(1) + length-1(1) + data(N)
+    const body = Buffer.alloc(5 + dataBuffer.length);
+    body[0] = 0; // No side effects
+    body.writeUInt16LE(address, 1);
+    body[3] = memspace;
+    body[4] = dataBuffer.length - 1;
+    dataBuffer.copy(body, 5);
+
+    await this.sendCommand(Command.MemorySet, body);
+  }
+
+  async getRegisters(memspace: MemorySpace = MemorySpace.MainCPU): Promise<ViceResponse> {
+    const body = Buffer.alloc(1);
+    body[0] = memspace;
+    return this.sendCommand(Command.RegistersGet, body);
+  }
+
+  async continue(): Promise<void> {
+    await this.sendCommand(Command.Continue);
+    this.state.running = true;
+  }
+
+  async step(count = 1, stepOver = false): Promise<ViceResponse> {
+    const body = Buffer.alloc(3);
+    body[0] = stepOver ? 1 : 0;
+    body.writeUInt16LE(count, 1);
+    const response = await this.sendCommand(Command.Step, body);
+    this.state.running = false;
+    return response;
+  }
+
+  async reset(hard = false): Promise<void> {
+    const body = Buffer.alloc(1);
+    body[0] = hard ? 1 : 0;
+    await this.sendCommand(Command.Reset, body);
+  }
+
+  async setBreakpoint(
+    address: number,
+    options: {
+      enabled?: boolean;
+      stop?: boolean;
+      temporary?: boolean;
+    } = {}
+  ): Promise<number> {
+    const { enabled = true, stop = true, temporary = false } = options;
+
+    if (address < 0 || address > 0xffff) {
+      throw this.makeError(
+        "INVALID_ADDRESS",
+        `Address 0x${address.toString(16)} is outside C64 memory range`,
+        "C64 addresses are 16-bit (0x0000-0xFFFF)"
+      );
+    }
+
+    // Build request: start(2) + end(2) + stop(1) + enabled(1) + op(1) + temp(1)
+    const body = Buffer.alloc(8);
+    body.writeUInt16LE(address, 0);
+    body.writeUInt16LE(address, 2);
+    body[4] = stop ? 1 : 0;
+    body[5] = enabled ? 1 : 0;
+    body[6] = 0x01; // Exec
+    body[7] = temporary ? 1 : 0;
+
+    const response = await this.sendCommand(Command.CheckpointSet, body);
+    return response.body.readUInt32LE(0);
+  }
+
+  async deleteBreakpoint(checkpointId: number): Promise<void> {
+    const body = Buffer.alloc(4);
+    body.writeUInt32LE(checkpointId, 0);
+    await this.sendCommand(Command.CheckpointDelete, body);
+  }
+}
+
+// Singleton instance
+let clientInstance: ViceClient | null = null;
+
+export function getViceClient(): ViceClient {
+  if (!clientInstance) {
+    clientInstance = new ViceClient();
+  }
+  return clientInstance;
+}
