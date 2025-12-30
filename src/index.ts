@@ -18,6 +18,12 @@ import {
 
 const VERSION = "1.0.1";
 
+// Handle --version flag
+if (process.argv.includes("--version") || process.argv.includes("-v")) {
+  console.log(`vice-mcp v${VERSION}`);
+  process.exit(0);
+}
+
 const server = new McpServer({
   name: "vice-mcp",
   version: VERSION,
