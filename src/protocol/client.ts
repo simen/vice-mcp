@@ -380,12 +380,14 @@ export class ViceClient {
       );
     }
 
-    // Build request: side_effects(1) + start(2) + memspace(1) + end(2)
-    const body = Buffer.alloc(6);
+    // Build request per official VICE docs:
+    // side_effects(1) + start(2) + end(2) + memspace(1) + bankId(2) = 8 bytes
+    const body = Buffer.alloc(8);
     body[0] = 0; // No side effects
     body.writeUInt16LE(startAddress, 1);
-    body[3] = memspace;
-    body.writeUInt16LE(endAddress, 4);
+    body.writeUInt16LE(endAddress, 3);
+    body[5] = memspace;
+    body.writeUInt16LE(0, 6); // bankId = 0 (default bank)
 
     // VICE sends MemoryGet response with type 0x01
     const response = await this.sendCommand(Command.MemoryGet, body, ResponseType.MemoryGet);
