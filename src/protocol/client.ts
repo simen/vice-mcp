@@ -55,6 +55,7 @@ export class ViceClient {
     {
       resolve: (response: ViceResponse) => void;
       reject: (error: ViceError) => void;
+      expectedResponseType?: ResponseType; // For async event matching
     }
   >();
   private state: ConnectionState = {
@@ -215,20 +216,48 @@ export class ViceClient {
   }
 
   private handleResponse(response: ViceResponse): void {
-    // Check for async events
+    debugLog(`handleResponse: type=0x${response.responseType.toString(16)}, reqId=${response.requestId}`);
+
+    // Check for async events (state changes)
     if (response.responseType === ResponseType.Stopped || response.responseType === ResponseType.CheckpointHit) {
       this.state.running = false;
       this.onStopped?.(response);
-      return;
+      // Don't return - this might also be a response to a pending request
     }
 
     if (response.responseType === ResponseType.Resumed) {
       this.state.running = true;
       this.onResumed?.(response);
+      // Don't return - continue to check for pending requests
+    }
+
+    // VICE API v1 sends some responses as async events (ReqID=0xff)
+    // For these, we match by response type to the oldest pending request expecting that type
+    if (response.requestId === 0xff) {
+      // Find a pending request that expects this response type
+      for (const [reqId, pending] of this.pendingRequests) {
+        if (pending.expectedResponseType === response.responseType) {
+          debugLog(`Matched async response type 0x${response.responseType.toString(16)} to request ${reqId}`);
+          this.pendingRequests.delete(reqId);
+          if (response.errorCode !== ErrorCode.Ok) {
+            pending.reject(
+              this.makeError(
+                `VICE_ERROR_${response.errorCode}`,
+                `VICE returned error code ${response.errorCode}`,
+                this.getErrorSuggestion(response.errorCode)
+              )
+            );
+          } else {
+            pending.resolve(response);
+          }
+          return;
+        }
+      }
+      debugLog(`No pending request matched async response type 0x${response.responseType.toString(16)}`);
       return;
     }
 
-    // Match to pending request
+    // Match to pending request by request ID
     const pending = this.pendingRequests.get(response.requestId);
     if (pending) {
       this.pendingRequests.delete(response.requestId);
@@ -261,7 +290,11 @@ export class ViceClient {
     }
   }
 
-  private async sendCommand(command: Command, body: Buffer = Buffer.alloc(0)): Promise<ViceResponse> {
+  private async sendCommand(
+    command: Command,
+    body: Buffer = Buffer.alloc(0),
+    expectedResponseType?: ResponseType
+  ): Promise<ViceResponse> {
     if (!this.socket || !this.state.connected) {
       throw this.makeError(
         "NOT_CONNECTED",
@@ -282,10 +315,10 @@ export class ViceClient {
     header[7] = command;
 
     const packet = Buffer.concat([header, body]);
-    debugLog(`Sending command 0x${command.toString(16)}, reqId=${requestId}`, packet);
+    debugLog(`Sending command 0x${command.toString(16)}, reqId=${requestId}, expectType=${expectedResponseType?.toString(16) ?? 'any'}`, packet);
 
     return new Promise((resolve, reject) => {
-      this.pendingRequests.set(requestId, { resolve, reject });
+      this.pendingRequests.set(requestId, { resolve, reject, expectedResponseType });
 
       this.socket!.write(packet, (err) => {
         if (err) {
@@ -353,7 +386,8 @@ export class ViceClient {
     body[3] = memspace;
     body.writeUInt16LE(endAddress, 4);
 
-    const response = await this.sendCommand(Command.MemoryGet, body);
+    // VICE may send MemoryGet (0x31) as async event with ReqID=0xff
+    const response = await this.sendCommand(Command.MemoryGet, body, ResponseType.MemoryGet);
 
     // Response body: length(2) + data(N)
     const dataLength = response.body.readUInt16LE(0);
@@ -405,7 +439,8 @@ export class ViceClient {
   async getRegisters(memspace: MemorySpace = MemorySpace.MainCPU): Promise<ViceResponse> {
     const body = Buffer.alloc(1);
     body[0] = memspace;
-    return this.sendCommand(Command.RegistersGet, body);
+    // VICE sends RegisterInfo (0x62) as async event with ReqID=0xff
+    return this.sendCommand(Command.RegistersGet, body, ResponseType.RegisterInfo);
   }
 
   async setRegisters(
