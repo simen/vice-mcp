@@ -16,10 +16,15 @@ import {
   getLabelForAddress,
 } from "./utils/index.js";
 
+const VERSION = "1.0.1";
+
 const server = new McpServer({
   name: "vice-mcp",
-  version: "0.1.0",
+  version: VERSION,
 });
+
+// Log version to stderr for debugging (MCP uses stdout for protocol)
+console.error(`[vice-mcp] Starting v${VERSION}`);
 
 const client = getViceClient();
 

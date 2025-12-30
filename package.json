@@ -1,6 +1,6 @@
 {
   "name": "vice-mcp",
-  "version": "0.1.0",
+  "version": "1.0.1",
   "description": "MCP server for autonomous C64 debugging via VICE emulator",
   "type": "module",
   "main": "dist/index.js",
