@@ -219,7 +219,8 @@ export class ViceClient {
     debugLog(`handleResponse: type=0x${response.responseType.toString(16)}, reqId=${response.requestId}`);
 
     // Check for async events (state changes)
-    if (response.responseType === ResponseType.Stopped || response.responseType === ResponseType.CheckpointHit) {
+    // Stopped = 0x62, which VICE sends when emulation stops
+    if (response.responseType === ResponseType.Stopped) {
       this.state.running = false;
       this.onStopped?.(response);
       // Don't return - this might also be a response to a pending request
@@ -386,8 +387,8 @@ export class ViceClient {
     body[3] = memspace;
     body.writeUInt16LE(endAddress, 4);
 
-    // Try without async matching - maybe VICE sends MemoryGet with matched ReqID
-    const response = await this.sendCommand(Command.MemoryGet, body);
+    // VICE sends MemoryGet response with type 0x01
+    const response = await this.sendCommand(Command.MemoryGet, body, ResponseType.MemoryGet);
 
     // Response body: length(2) + data(N)
     const dataLength = response.body.readUInt16LE(0);
@@ -439,7 +440,7 @@ export class ViceClient {
   async getRegisters(memspace: MemorySpace = MemorySpace.MainCPU): Promise<ViceResponse> {
     const body = Buffer.alloc(1);
     body[0] = memspace;
-    // VICE sends RegisterInfo (0x62) as async event with ReqID=0xff
+    // VICE sends RegisterInfo (0x31) as async event with ReqID=0xff
     return this.sendCommand(Command.RegistersGet, body, ResponseType.RegisterInfo);
   }
 

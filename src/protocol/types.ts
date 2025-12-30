@@ -49,16 +49,20 @@ export enum Command {
   AutoStart = 0xdd,
 }
 
-// Response types
+// Response types (per official VICE manual)
 export enum ResponseType {
   Invalid = 0x00,
-  Ok = 0x01,
-  Object = 0x02,
-  Stopped = 0x11,
-  Resumed = 0x12,
-  MemoryGet = 0x31,
-  RegisterInfo = 0x62,
-  CheckpointHit = 0x63,
+  MemoryGet = 0x01,    // Memory read response
+  MemorySet = 0x02,    // Memory write response
+  CheckpointResponse = 0x11, // Checkpoint set/get/delete response
+  CheckpointInfo = 0x12,     // Checkpoint info
+  RegisterInfo = 0x31,       // Register info (async event when stopped)
+  Dump = 0x41,
+  Undump = 0x42,
+  ResourceGet = 0x51,
+  ResourceSet = 0x52,
+  Stopped = 0x62,            // Stopped event (async)
+  Resumed = 0x63,            // Resumed event (async)
 }
 
 // Memory spaces
