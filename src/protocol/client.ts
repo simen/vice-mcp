@@ -33,6 +33,19 @@ export interface CheckpointInfo {
 // Keep for backwards compatibility
 export type BreakpointInfo = CheckpointInfo;
 
+// Debug logging - set to true to see protocol traffic
+const DEBUG = true;
+function debugLog(msg: string, data?: Buffer | unknown): void {
+  if (!DEBUG) return;
+  if (data instanceof Buffer) {
+    console.error(`[VICE] ${msg}: ${data.toString("hex")} (${data.length} bytes)`);
+  } else if (data !== undefined) {
+    console.error(`[VICE] ${msg}:`, data);
+  } else {
+    console.error(`[VICE] ${msg}`);
+  }
+}
+
 export class ViceClient {
   private socket: Socket | null = null;
   private requestId = 0;
@@ -146,25 +159,29 @@ export class ViceClient {
   }
 
   private nextRequestId(): number {
-    this.requestId = (this.requestId + 1) & 0xffffffff;
+    this.requestId = (this.requestId + 1) & 0xff;
     return this.requestId;
   }
 
   private handleData(data: Buffer): void {
     this.responseBuffer = Buffer.concat([this.responseBuffer, data]);
+    debugLog("Received data", data);
 
     // Process complete packets
-    // Response header: STX(1) + API(1) + bodyLength(4) + responseType(1) + errorCode(1) + requestId(4) = 12 bytes
-    while (this.responseBuffer.length >= 12) {
+    // Response header: STX(1) + API(1) + bodyLength(4) + responseType(1) + errorCode(1) + requestId(1) = 9 bytes
+    while (this.responseBuffer.length >= 9) {
       const stx = this.responseBuffer[0];
       if (stx !== STX) {
         // Protocol error, skip byte
+        debugLog(`Skipping non-STX byte: 0x${stx.toString(16)}`);
         this.responseBuffer = this.responseBuffer.subarray(1);
         continue;
       }
 
       const bodyLength = this.responseBuffer.readUInt32LE(2);
-      const totalLength = 12 + bodyLength; // Header (12) + body
+      const totalLength = 6 + bodyLength; // Header prefix (6) + body (which includes type, error, reqId)
+
+      debugLog(`Packet: bodyLength=${bodyLength}, totalLength=${totalLength}, bufferLen=${this.responseBuffer.length}`);
 
       if (this.responseBuffer.length < totalLength) {
         // Wait for more data
@@ -172,11 +189,14 @@ export class ViceClient {
       }
 
       // Parse complete packet
-      // Response format: STX(1) + API(1) + bodyLen(4) + type(1) + error(1) + reqId(4) + body
+      // Response format: STX(1) + API(1) + bodyLen(4) + type(1) + error(1) + reqId(1) + body
       const responseType = this.responseBuffer[6] as ResponseType;
       const errorCode = this.responseBuffer[7] as ErrorCode;
-      const requestId = this.responseBuffer.readUInt32LE(8);
-      const body = this.responseBuffer.subarray(12, totalLength);
+      const requestId = this.responseBuffer[8];
+      const body = this.responseBuffer.subarray(9, totalLength);
+
+      debugLog(`Parsed response: type=0x${responseType.toString(16)}, error=0x${errorCode.toString(16)}, reqId=${requestId}`);
+      debugLog("Response body", body);
 
       const response: ViceResponse = {
         responseType,
@@ -251,16 +271,17 @@ export class ViceClient {
 
     const requestId = this.nextRequestId();
 
-    // Build packet: STX(1) + API(1) + Length(4) + RequestID(4) + Command(1) + Body
-    // Length field includes: RequestID(4) + Command(1) + Body
-    const header = Buffer.alloc(11);
+    // Build packet: STX(1) + API(1) + Length(4) + RequestID(1) + Command(1) + Body
+    // Length field includes: RequestID(1) + Command(1) + Body
+    const header = Buffer.alloc(8);
     header[0] = STX;
     header[1] = API_VERSION;
-    header.writeUInt32LE(body.length + 5, 2); // Body length includes request ID (4) and command (1)
-    header.writeUInt32LE(requestId, 6);
-    header[10] = command;
+    header.writeUInt32LE(body.length + 2, 2); // Body length includes request ID (1) and command (1)
+    header[6] = requestId;
+    header[7] = command;
 
     const packet = Buffer.concat([header, body]);
+    debugLog(`Sending command 0x${command.toString(16)}, reqId=${requestId}`, packet);
 
     return new Promise((resolve, reject) => {
       this.pendingRequests.set(requestId, { resolve, reject });
