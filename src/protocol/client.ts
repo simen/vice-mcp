@@ -7,6 +7,7 @@ import {
   ResponseType,
   ErrorCode,
   MemorySpace,
+  CheckpointOp,
   ViceResponse,
   ConnectionState,
 } from "./types.js";
@@ -18,12 +19,19 @@ export interface ViceError {
   suggestion?: string;
 }
 
-export interface BreakpointInfo {
+export type CheckpointType = "exec" | "load" | "store";
+
+export interface CheckpointInfo {
   id: number;
-  address: number;
+  startAddress: number;
+  endAddress: number;
   enabled: boolean;
   temporary: boolean;
+  type: CheckpointType;
 }
+
+// Keep for backwards compatibility
+export type BreakpointInfo = CheckpointInfo;
 
 export class ViceClient {
   private socket: Socket | null = null;
@@ -42,8 +50,8 @@ export class ViceClient {
     port: 0,
     running: true,
   };
-  // Track breakpoints locally (VICE doesn't have a reliable list command in all versions)
-  private breakpoints = new Map<number, BreakpointInfo>();
+  // Track checkpoints locally (VICE doesn't have a reliable list command in all versions)
+  private checkpoints = new Map<number, CheckpointInfo>();
 
   // Event handlers for async events (breakpoints, etc.)
   public onStopped?: (response: ViceResponse) => void;
@@ -376,6 +384,34 @@ export class ViceClient {
     return this.sendCommand(Command.RegistersGet, body);
   }
 
+  async setRegisters(
+    registers: Array<{ id: number; value: number; size: 1 | 2 }>,
+    memspace: MemorySpace = MemorySpace.MainCPU
+  ): Promise<void> {
+    // Build body: memspace(1) + count(2) + [id(1) + size(1) + value(1|2)]...
+    let bodySize = 3; // memspace + count
+    for (const reg of registers) {
+      bodySize += 2 + reg.size; // id + size + value
+    }
+    const body = Buffer.alloc(bodySize);
+    body[0] = memspace;
+    body.writeUInt16LE(registers.length, 1);
+
+    let offset = 3;
+    for (const reg of registers) {
+      body[offset] = reg.id;
+      body[offset + 1] = reg.size;
+      if (reg.size === 1) {
+        body[offset + 2] = reg.value & 0xff;
+      } else {
+        body.writeUInt16LE(reg.value, offset + 2);
+      }
+      offset += 2 + reg.size;
+    }
+
+    await this.sendCommand(Command.RegistersSet, body);
+  }
+
   async continue(): Promise<void> {
     await this.sendCommand(Command.Continue);
     this.state.running = true;
@@ -387,6 +423,14 @@ export class ViceClient {
     body.writeUInt16LE(count, 1);
     const response = await this.sendCommand(Command.Step, body);
     this.state.running = false;
+    return response;
+  }
+
+  async advanceInstructions(count: number, stepOver = false): Promise<ViceResponse> {
+    const body = Buffer.alloc(3);
+    body[0] = stepOver ? 1 : 0;
+    body.writeUInt16LE(count, 1);
+    const response = await this.sendCommand(Command.AdvanceInstructions, body);
     return response;
   }
 
@@ -420,21 +464,109 @@ export class ViceClient {
     body.writeUInt16LE(address, 2);
     body[4] = stop ? 1 : 0;
     body[5] = enabled ? 1 : 0;
-    body[6] = 0x01; // Exec
+    body[6] = CheckpointOp.Exec;
     body[7] = temporary ? 1 : 0;
 
     const response = await this.sendCommand(Command.CheckpointSet, body);
     const id = response.body.readUInt32LE(0);
 
     // Track locally
-    this.breakpoints.set(id, {
+    this.checkpoints.set(id, {
       id,
-      address,
+      startAddress: address,
+      endAddress: address,
       enabled,
       temporary,
+      type: "exec",
     });
 
     return id;
+  }
+
+  async setWatchpoint(
+    startAddress: number,
+    endAddress: number,
+    type: "load" | "store" | "both",
+    options: {
+      enabled?: boolean;
+      stop?: boolean;
+      temporary?: boolean;
+    } = {}
+  ): Promise<number> {
+    const { enabled = true, stop = true, temporary = false } = options;
+
+    if (startAddress < 0 || startAddress > 0xffff) {
+      throw this.makeError(
+        "INVALID_ADDRESS",
+        `Start address 0x${startAddress.toString(16)} is outside C64 memory range`,
+        "C64 addresses are 16-bit (0x0000-0xFFFF)"
+      );
+    }
+    if (endAddress < 0 || endAddress > 0xffff) {
+      throw this.makeError(
+        "INVALID_ADDRESS",
+        `End address 0x${endAddress.toString(16)} is outside C64 memory range`,
+        "C64 addresses are 16-bit (0x0000-0xFFFF)"
+      );
+    }
+    if (startAddress > endAddress) {
+      throw this.makeError(
+        "INVALID_RANGE",
+        `Start address (0x${startAddress.toString(16)}) is greater than end address (0x${endAddress.toString(16)})`,
+        "Swap the addresses or check your range"
+      );
+    }
+
+    // Determine operation type
+    let op: number;
+    let checkpointType: CheckpointType;
+    if (type === "load") {
+      op = CheckpointOp.Load;
+      checkpointType = "load";
+    } else if (type === "store") {
+      op = CheckpointOp.Store;
+      checkpointType = "store";
+    } else {
+      op = CheckpointOp.Load | CheckpointOp.Store;
+      checkpointType = "load"; // Will track as load for simplicity
+    }
+
+    // Build request: start(2) + end(2) + stop(1) + enabled(1) + op(1) + temp(1)
+    const body = Buffer.alloc(8);
+    body.writeUInt16LE(startAddress, 0);
+    body.writeUInt16LE(endAddress, 2);
+    body[4] = stop ? 1 : 0;
+    body[5] = enabled ? 1 : 0;
+    body[6] = op;
+    body[7] = temporary ? 1 : 0;
+
+    const response = await this.sendCommand(Command.CheckpointSet, body);
+    const id = response.body.readUInt32LE(0);
+
+    // Track locally
+    this.checkpoints.set(id, {
+      id,
+      startAddress,
+      endAddress,
+      enabled,
+      temporary,
+      type: checkpointType,
+    });
+
+    return id;
+  }
+
+  async toggleCheckpoint(checkpointId: number, enabled: boolean): Promise<void> {
+    const body = Buffer.alloc(5);
+    body.writeUInt32LE(checkpointId, 0);
+    body[4] = enabled ? 1 : 0;
+    await this.sendCommand(Command.CheckpointToggle, body);
+
+    // Update local tracking
+    const cp = this.checkpoints.get(checkpointId);
+    if (cp) {
+      cp.enabled = enabled;
+    }
   }
 
   async deleteBreakpoint(checkpointId: number): Promise<void> {
@@ -443,11 +575,48 @@ export class ViceClient {
     await this.sendCommand(Command.CheckpointDelete, body);
 
     // Remove from local tracking
-    this.breakpoints.delete(checkpointId);
+    this.checkpoints.delete(checkpointId);
   }
 
-  listBreakpoints(): BreakpointInfo[] {
-    return Array.from(this.breakpoints.values());
+  listBreakpoints(): CheckpointInfo[] {
+    return Array.from(this.checkpoints.values()).filter((cp) => cp.type === "exec");
+  }
+
+  listWatchpoints(): CheckpointInfo[] {
+    return Array.from(this.checkpoints.values()).filter((cp) => cp.type !== "exec");
+  }
+
+  listCheckpoints(): CheckpointInfo[] {
+    return Array.from(this.checkpoints.values());
+  }
+
+  // Snapshot methods
+  async saveSnapshot(filename: string): Promise<void> {
+    const filenameBuffer = Buffer.from(filename, "utf8");
+    const body = Buffer.alloc(1 + filenameBuffer.length);
+    body[0] = filenameBuffer.length;
+    filenameBuffer.copy(body, 1);
+    await this.sendCommand(Command.Dump, body);
+  }
+
+  async loadSnapshot(filename: string): Promise<void> {
+    const filenameBuffer = Buffer.from(filename, "utf8");
+    const body = Buffer.alloc(1 + filenameBuffer.length);
+    body[0] = filenameBuffer.length;
+    filenameBuffer.copy(body, 1);
+    await this.sendCommand(Command.Undump, body);
+  }
+
+  // Autostart a program
+  async autostart(filename: string, fileIndex = 0, runAfterLoad = true): Promise<void> {
+    const filenameBuffer = Buffer.from(filename, "utf8");
+    // Body: run(1) + index(2) + filename_length(1) + filename
+    const body = Buffer.alloc(4 + filenameBuffer.length);
+    body[0] = runAfterLoad ? 1 : 0;
+    body.writeUInt16LE(fileIndex, 1);
+    body[3] = filenameBuffer.length;
+    filenameBuffer.copy(body, 4);
+    await this.sendCommand(Command.AutoStart, body);
   }
 }
 

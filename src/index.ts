@@ -11,6 +11,8 @@ import {
   getVideoAddresses,
   getGraphicsMode,
   isSpriteVisible,
+  disassemble,
+  getLabelForAddress,
 } from "./utils/index.js";
 
 const server = new McpServer({
@@ -644,14 +646,390 @@ Related tools: setBreakpoint, deleteBreakpoint`,
       breakpoints: breakpoints.map((bp) => ({
         id: bp.id,
         address: {
-          value: bp.address,
-          hex: `$${bp.address.toString(16).padStart(4, "0")}`,
+          value: bp.startAddress,
+          hex: `$${bp.startAddress.toString(16).padStart(4, "0")}`,
         },
         enabled: bp.enabled,
         temporary: bp.temporary,
       })),
       hint: `${breakpoints.length} breakpoint(s) active. Use deleteBreakpoint(id) to remove.`,
     });
+  }
+);
+
+// Tool: enableBreakpoint / disableBreakpoint - Toggle breakpoint state
+server.registerTool(
+  "toggleBreakpoint",
+  {
+    description: `Enable or disable a breakpoint without deleting it.
+
+Use this to temporarily disable breakpoints while keeping their configuration.
+
+Related tools: setBreakpoint, deleteBreakpoint, listBreakpoints`,
+    inputSchema: z.object({
+      breakpointId: z.number().describe("Breakpoint ID from setBreakpoint"),
+      enabled: z.boolean().describe("True to enable, false to disable"),
+    }),
+  },
+  async (args) => {
+    try {
+      await client.toggleCheckpoint(args.breakpointId, args.enabled);
+      return formatResponse({
+        success: true,
+        breakpointId: args.breakpointId,
+        enabled: args.enabled,
+        message: `Breakpoint ${args.breakpointId} ${args.enabled ? "enabled" : "disabled"}`,
+      });
+    } catch (error) {
+      return formatError(error as ViceError);
+    }
+  }
+);
+
+// Tool: setWatchpoint - Set memory watchpoint
+server.registerTool(
+  "setWatchpoint",
+  {
+    description: `Set a memory watchpoint to stop when memory is read or written.
+
+Watchpoints are powerful for debugging:
+- "Why is this value changing?" → Use store watchpoint
+- "What's reading this address?" → Use load watchpoint
+- "Track all access to this region" → Use both
+
+Range can be single address or address range (e.g., $D800-$DBFF for color RAM).
+
+Related tools: deleteBreakpoint, listWatchpoints, continue`,
+    inputSchema: z.object({
+      startAddress: z.number().min(0).max(0xffff).describe("Start address of watched range (0x0000-0xFFFF)"),
+      endAddress: z
+        .number()
+        .min(0)
+        .max(0xffff)
+        .optional()
+        .describe("End address of watched range (default: same as start for single address)"),
+      type: z.enum(["load", "store", "both"]).describe("Watch type: 'load' (read), 'store' (write), or 'both'"),
+      enabled: z.boolean().optional().describe("Whether watchpoint is active (default: true)"),
+      temporary: z.boolean().optional().describe("Auto-delete after hit (default: false)"),
+    }),
+  },
+  async (args) => {
+    try {
+      const endAddr = args.endAddress ?? args.startAddress;
+      const id = await client.setWatchpoint(args.startAddress, endAddr, args.type, {
+        enabled: args.enabled ?? true,
+        temporary: args.temporary ?? false,
+      });
+
+      const isSingleAddress = args.startAddress === endAddr;
+
+      return formatResponse({
+        success: true,
+        watchpointId: id,
+        startAddress: {
+          value: args.startAddress,
+          hex: `$${args.startAddress.toString(16).padStart(4, "0")}`,
+        },
+        endAddress: {
+          value: endAddr,
+          hex: `$${endAddr.toString(16).padStart(4, "0")}`,
+        },
+        type: args.type,
+        enabled: args.enabled ?? true,
+        temporary: args.temporary ?? false,
+        message: isSingleAddress
+          ? `Watchpoint ${id} set at $${args.startAddress.toString(16).padStart(4, "0")} (${args.type})`
+          : `Watchpoint ${id} set for $${args.startAddress.toString(16).padStart(4, "0")}-$${endAddr.toString(16).padStart(4, "0")} (${args.type})`,
+        hint: "Use continue() to run until watchpoint is triggered",
+      });
+    } catch (error) {
+      return formatError(error as ViceError);
+    }
+  }
+);
+
+// Tool: listWatchpoints - List all watchpoints
+server.registerTool(
+  "listWatchpoints",
+  {
+    description: `List all active memory watchpoints.
+
+Shows watchpoint IDs, address ranges, type (load/store), and status.
+
+Related tools: setWatchpoint, deleteBreakpoint, listBreakpoints`,
+  },
+  async () => {
+    const watchpoints = client.listWatchpoints();
+
+    if (watchpoints.length === 0) {
+      return formatResponse({
+        count: 0,
+        watchpoints: [],
+        hint: "No watchpoints set. Use setWatchpoint() to add one.",
+      });
+    }
+
+    return formatResponse({
+      count: watchpoints.length,
+      watchpoints: watchpoints.map((wp) => ({
+        id: wp.id,
+        startAddress: {
+          value: wp.startAddress,
+          hex: `$${wp.startAddress.toString(16).padStart(4, "0")}`,
+        },
+        endAddress: {
+          value: wp.endAddress,
+          hex: `$${wp.endAddress.toString(16).padStart(4, "0")}`,
+        },
+        type: wp.type,
+        enabled: wp.enabled,
+        temporary: wp.temporary,
+      })),
+      hint: `${watchpoints.length} watchpoint(s) active. Use deleteBreakpoint(id) to remove.`,
+    });
+  }
+);
+
+// Tool: runTo - Run until specific address
+server.registerTool(
+  "runTo",
+  {
+    description: `Run execution until a specific address is reached.
+
+Sets a temporary breakpoint at the target address and continues execution.
+The breakpoint is automatically deleted when hit.
+
+Use for:
+- "Run until this function" → runTo(functionAddress)
+- "Skip to the end of this loop" → runTo(addressAfterLoop)
+
+Related tools: continue, step, setBreakpoint`,
+    inputSchema: z.object({
+      address: z.number().min(0).max(0xffff).describe("Address to run to (0x0000-0xFFFF)"),
+    }),
+  },
+  async (args) => {
+    try {
+      // Set temporary breakpoint
+      const bpId = await client.setBreakpoint(args.address, { temporary: true });
+
+      // Continue execution
+      await client.continue();
+
+      return formatResponse({
+        running: true,
+        targetAddress: {
+          value: args.address,
+          hex: `$${args.address.toString(16).padStart(4, "0")}`,
+        },
+        temporaryBreakpointId: bpId,
+        message: `Running to $${args.address.toString(16).padStart(4, "0")}`,
+        hint: "Execution will stop when target address is reached. Use status() to check state.",
+      });
+    } catch (error) {
+      return formatError(error as ViceError);
+    }
+  }
+);
+
+// Tool: disassemble - Disassemble memory
+server.registerTool(
+  "disassemble",
+  {
+    description: `Disassemble 6502 machine code at a memory address.
+
+Returns human-readable assembly instructions with:
+- Address and raw bytes
+- Mnemonic and operand
+- Branch target addresses (for branch instructions)
+- Known KERNAL/BASIC labels
+
+Options:
+- address: Start address (default: current PC)
+- count: Number of instructions (default: 10)
+
+Related tools: readMemory, getRegisters, step`,
+    inputSchema: z.object({
+      address: z
+        .number()
+        .min(0)
+        .max(0xffff)
+        .optional()
+        .describe("Start address (default: current PC)"),
+      count: z.number().min(1).max(100).optional().describe("Number of instructions to disassemble (default: 10)"),
+    }),
+  },
+  async (args) => {
+    try {
+      // Get PC if no address specified
+      let startAddress = args.address;
+      if (startAddress === undefined) {
+        const regResponse = await client.getRegisters();
+        const count = regResponse.body.readUInt16LE(0);
+        let offset = 2;
+        for (let i = 0; i < count && offset < regResponse.body.length; i++) {
+          const id = regResponse.body[offset];
+          const size = regResponse.body[offset + 1];
+          offset += 2;
+          if (id === 3 && size === 2) {
+            startAddress = regResponse.body.readUInt16LE(offset);
+            break;
+          }
+          offset += size;
+        }
+        startAddress = startAddress ?? 0;
+      }
+
+      const instructionCount = args.count || 10;
+
+      // Read enough bytes (max 3 bytes per instruction)
+      const bytesToRead = Math.min(instructionCount * 3, 0x10000 - startAddress);
+      const endAddress = Math.min(startAddress + bytesToRead - 1, 0xffff);
+      const memData = await client.readMemory(startAddress, endAddress);
+
+      // Disassemble
+      const instructions = disassemble(memData, startAddress, instructionCount);
+
+      // Add labels for known addresses
+      const instructionsWithLabels = instructions.map((instr) => {
+        const label = getLabelForAddress(instr.address);
+        const targetLabel = instr.branchTarget ? getLabelForAddress(instr.branchTarget) : undefined;
+        return {
+          ...instr,
+          label,
+          targetLabel,
+        };
+      });
+
+      // Format for output
+      const lines = instructionsWithLabels.map((instr) => {
+        let line = `${instr.addressHex}: ${instr.bytesHex.padEnd(8)} ${instr.fullInstruction}`;
+        if (instr.label) line += `  ; ${instr.label}`;
+        if (instr.targetLabel) line += `  ; -> ${instr.targetLabel}`;
+        return line;
+      });
+
+      return formatResponse({
+        startAddress: {
+          value: startAddress,
+          hex: `$${startAddress.toString(16).padStart(4, "0")}`,
+        },
+        instructionCount: instructions.length,
+        instructions: instructionsWithLabels,
+        listing: lines.join("\n"),
+        hint:
+          instructions.length > 0 && instructions[0].mnemonic === "BRK"
+            ? "First instruction is BRK - this might be uninitialized memory or data"
+            : `Disassembled ${instructions.length} instruction(s) from $${startAddress.toString(16).padStart(4, "0")}`,
+      });
+    } catch (error) {
+      return formatError(error as ViceError);
+    }
+  }
+);
+
+// Tool: saveSnapshot - Save machine state
+server.registerTool(
+  "saveSnapshot",
+  {
+    description: `Save the complete machine state to a file.
+
+Creates a VICE snapshot file containing:
+- All memory (RAM, I/O states)
+- CPU registers
+- VIC-II, SID, CIA states
+- Disk drive state (if attached)
+
+Use to:
+- Save state before risky debugging
+- Create restore points
+- Share exact machine state
+
+Related tools: loadSnapshot`,
+    inputSchema: z.object({
+      filename: z.string().describe("Filename for the snapshot (e.g., 'debug-state.vsf')"),
+    }),
+  },
+  async (args) => {
+    try {
+      await client.saveSnapshot(args.filename);
+      return formatResponse({
+        success: true,
+        filename: args.filename,
+        message: `Snapshot saved to ${args.filename}`,
+        hint: "Use loadSnapshot() to restore this state later",
+      });
+    } catch (error) {
+      return formatError(error as ViceError);
+    }
+  }
+);
+
+// Tool: loadSnapshot - Load machine state
+server.registerTool(
+  "loadSnapshot",
+  {
+    description: `Load a previously saved machine state from a file.
+
+Restores complete machine state including memory, registers, and peripheral states.
+
+Warning: This completely replaces the current state!
+
+Related tools: saveSnapshot`,
+    inputSchema: z.object({
+      filename: z.string().describe("Filename of the snapshot to load"),
+    }),
+  },
+  async (args) => {
+    try {
+      await client.loadSnapshot(args.filename);
+      return formatResponse({
+        success: true,
+        filename: args.filename,
+        message: `Snapshot loaded from ${args.filename}`,
+        hint: "Machine state restored. Use getRegisters() to verify state.",
+      });
+    } catch (error) {
+      return formatError(error as ViceError);
+    }
+  }
+);
+
+// Tool: loadProgram - Autostart a program
+server.registerTool(
+  "loadProgram",
+  {
+    description: `Load and optionally run a program file.
+
+Supports PRG, D64, T64, and other C64 file formats.
+For disk images, can specify which file to run.
+
+Options:
+- run: If true (default), starts execution after loading
+- fileIndex: For disk images, which file to load (0 = first)
+
+Related tools: reset, status, setBreakpoint`,
+    inputSchema: z.object({
+      filename: z.string().describe("Path to the program file (PRG, D64, T64, etc.)"),
+      run: z.boolean().optional().describe("Run after loading (default: true)"),
+      fileIndex: z.number().optional().describe("File index in disk image (default: 0)"),
+    }),
+  },
+  async (args) => {
+    try {
+      await client.autostart(args.filename, args.fileIndex ?? 0, args.run ?? true);
+      return formatResponse({
+        success: true,
+        filename: args.filename,
+        run: args.run ?? true,
+        message: `Loading ${args.filename}${args.run !== false ? " and running" : ""}`,
+        hint: args.run !== false
+          ? "Program is loading. Set breakpoints before it reaches your code of interest."
+          : "Program loaded but not started. Use continue() to run.",
+      });
+    } catch (error) {
+      return formatError(error as ViceError);
+    }
   }
 );
 

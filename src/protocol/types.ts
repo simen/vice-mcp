@@ -6,15 +6,41 @@ export const API_VERSION = 0x02;
 
 // Command codes
 export enum Command {
+  // Memory operations
   MemoryGet = 0x01,
   MemorySet = 0x02,
-  CheckpointSet = 0x11,
+
+  // Checkpoint (breakpoint/watchpoint) operations
+  CheckpointGet = 0x11,
+  CheckpointSet = 0x12,
   CheckpointDelete = 0x13,
-  RegistersGet = 0x22,
-  Continue = 0x31,
-  Step = 0x32,
+  CheckpointList = 0x14,
+  CheckpointToggle = 0x15,
+
+  // Register operations
+  RegistersGet = 0x31,
+  RegistersSet = 0x32,
+
+  // Execution control
+  Dump = 0x41,
+  Undump = 0x42,
   Reset = 0x43,
-  Exit = 0x71,
+
+  // Resources
+  ResourceGet = 0x51,
+  ResourceSet = 0x52,
+
+  // Advanced execution
+  AdvanceInstructions = 0x71,
+  KeyboardFeed = 0x72,
+  Continue = 0x81,
+  Step = 0x82,
+
+  // Quit
+  Quit = 0xbb,
+
+  // Autostart
+  AutoStart = 0xdd,
 }
 
 // Response types
