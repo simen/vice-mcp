@@ -146,7 +146,7 @@ export class ViceClient {
   }
 
   private nextRequestId(): number {
-    this.requestId = (this.requestId + 1) & 0xff;
+    this.requestId = (this.requestId + 1) & 0xffffffff;
     return this.requestId;
   }
 
@@ -154,8 +154,8 @@ export class ViceClient {
     this.responseBuffer = Buffer.concat([this.responseBuffer, data]);
 
     // Process complete packets
-    while (this.responseBuffer.length >= 9) {
-      // Minimum header size
+    // Response header: STX(1) + API(1) + bodyLength(4) + responseType(1) + errorCode(1) + requestId(4) = 12 bytes
+    while (this.responseBuffer.length >= 12) {
       const stx = this.responseBuffer[0];
       if (stx !== STX) {
         // Protocol error, skip byte
@@ -164,7 +164,7 @@ export class ViceClient {
       }
 
       const bodyLength = this.responseBuffer.readUInt32LE(2);
-      const totalLength = 6 + bodyLength; // Header (6) + body
+      const totalLength = 12 + bodyLength; // Header (12) + body
 
       if (this.responseBuffer.length < totalLength) {
         // Wait for more data
@@ -172,10 +172,11 @@ export class ViceClient {
       }
 
       // Parse complete packet
+      // Response format: STX(1) + API(1) + bodyLen(4) + type(1) + error(1) + reqId(4) + body
       const responseType = this.responseBuffer[6] as ResponseType;
       const errorCode = this.responseBuffer[7] as ErrorCode;
-      const requestId = this.responseBuffer[8];
-      const body = this.responseBuffer.subarray(9, totalLength);
+      const requestId = this.responseBuffer.readUInt32LE(8);
+      const body = this.responseBuffer.subarray(12, totalLength);
 
       const response: ViceResponse = {
         responseType,
@@ -250,13 +251,14 @@ export class ViceClient {
 
     const requestId = this.nextRequestId();
 
-    // Build packet: STX (1) + API (1) + Length (4) + RequestID (1) + Command (1) + Body
-    const header = Buffer.alloc(8);
+    // Build packet: STX(1) + API(1) + Length(4) + RequestID(4) + Command(1) + Body
+    // Length field includes: RequestID(4) + Command(1) + Body
+    const header = Buffer.alloc(11);
     header[0] = STX;
     header[1] = API_VERSION;
-    header.writeUInt32LE(body.length + 2, 2); // Body length includes request ID and command
-    header[6] = requestId;
-    header[7] = command;
+    header.writeUInt32LE(body.length + 5, 2); // Body length includes request ID (4) and command (1)
+    header.writeUInt32LE(requestId, 6);
+    header[10] = command;
 
     const packet = Buffer.concat([header, body]);
 
