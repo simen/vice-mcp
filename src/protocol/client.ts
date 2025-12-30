@@ -18,6 +18,13 @@ export interface ViceError {
   suggestion?: string;
 }
 
+export interface BreakpointInfo {
+  id: number;
+  address: number;
+  enabled: boolean;
+  temporary: boolean;
+}
+
 export class ViceClient {
   private socket: Socket | null = null;
   private requestId = 0;
@@ -35,6 +42,8 @@ export class ViceClient {
     port: 0,
     running: true,
   };
+  // Track breakpoints locally (VICE doesn't have a reliable list command in all versions)
+  private breakpoints = new Map<number, BreakpointInfo>();
 
   // Event handlers for async events (breakpoints, etc.)
   public onStopped?: (response: ViceResponse) => void;
@@ -415,13 +424,30 @@ export class ViceClient {
     body[7] = temporary ? 1 : 0;
 
     const response = await this.sendCommand(Command.CheckpointSet, body);
-    return response.body.readUInt32LE(0);
+    const id = response.body.readUInt32LE(0);
+
+    // Track locally
+    this.breakpoints.set(id, {
+      id,
+      address,
+      enabled,
+      temporary,
+    });
+
+    return id;
   }
 
   async deleteBreakpoint(checkpointId: number): Promise<void> {
     const body = Buffer.alloc(4);
     body.writeUInt32LE(checkpointId, 0);
     await this.sendCommand(Command.CheckpointDelete, body);
+
+    // Remove from local tracking
+    this.breakpoints.delete(checkpointId);
+  }
+
+  listBreakpoints(): BreakpointInfo[] {
+    return Array.from(this.breakpoints.values());
   }
 }
 

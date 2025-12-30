@@ -94,8 +94,8 @@ Related tools: connect, disconnect`,
       }),
       hint: state.connected
         ? state.running
-          ? "VICE is running. Use step() to pause execution."
-          : "VICE is paused. Use continue() to resume."
+          ? "VICE is running. Use setBreakpoint() + continue() to pause at a specific point, or step() to execute one instruction."
+          : "VICE is paused. Use continue() to resume or step() to execute one instruction."
         : "Not connected. Use connect() to establish connection to VICE.",
     });
   }
@@ -383,6 +383,17 @@ Related tools: setRegister, step, continue, status`,
         zero: !!(flags & 0x02),
         carry: !!(flags & 0x01),
         raw: flags,
+        // Compact string representation: NV-BDIZC (uppercase = set)
+        string: [
+          flags & 0x80 ? "N" : "n",
+          flags & 0x40 ? "V" : "v",
+          "-",
+          flags & 0x10 ? "B" : "b",
+          flags & 0x08 ? "D" : "d",
+          flags & 0x04 ? "I" : "i",
+          flags & 0x02 ? "Z" : "z",
+          flags & 0x01 ? "C" : "c",
+        ].join(""),
       };
 
       return formatResponse({
@@ -594,6 +605,45 @@ Related tools: setBreakpoint, listBreakpoints`,
     } catch (error) {
       return formatError(error as ViceError);
     }
+  }
+);
+
+// Tool: listBreakpoints - List all breakpoints
+server.registerTool(
+  "listBreakpoints",
+  {
+    description: `List all active breakpoints.
+
+Shows breakpoint IDs, addresses, and status for all breakpoints set in this session.
+
+Note: This tracks breakpoints set through this MCP session. Breakpoints set through VICE's built-in monitor may not appear.
+
+Related tools: setBreakpoint, deleteBreakpoint`,
+  },
+  async () => {
+    const breakpoints = client.listBreakpoints();
+
+    if (breakpoints.length === 0) {
+      return formatResponse({
+        count: 0,
+        breakpoints: [],
+        hint: "No breakpoints set. Use setBreakpoint() to add one.",
+      });
+    }
+
+    return formatResponse({
+      count: breakpoints.length,
+      breakpoints: breakpoints.map((bp) => ({
+        id: bp.id,
+        address: {
+          value: bp.address,
+          hex: `$${bp.address.toString(16).padStart(4, "0")}`,
+        },
+        enabled: bp.enabled,
+        temporary: bp.temporary,
+      })),
+      hint: `${breakpoints.length} breakpoint(s) active. Use deleteBreakpoint(id) to remove.`,
+    });
   }
 );
 
